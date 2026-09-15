@@ -125,40 +125,92 @@ static uintptr_t sc_find_export(uintptr_t mod_base, DWORD func_hash) {
 }
 
 // pre-computed hashes (djb2 lowercase)
-// kernel32.dll = 0x6DDB9555
-// ntdll.dll    = 0x1EDAB0ED
-// LoadLibraryA = 0xB7072FF0
-// GetProcAddress = 0x1FC0EAEE
-// RtlAddFunctionTable = 0xA5670B3F
-
 #define H_KERNEL32        0x6DDB9555u
 #define H_NTDLL           0x1EDAB0EDu
-#define H_LOADLIBRARYA    0xB7072FF0u
-#define H_GETPROCADDRESS  0x1FC0EAEEu
 #define H_RTLADDFUNCTABLE 0xA5670B3Fu
+
+// sc_strlen for import name hashing inside shellcode
+static int sc_strlen(const char* s) { int n = 0; while (s[n]) n++; return n; }
+
+// find module in PEB by ASCII name (not hash) — for import table DLL names
+static uintptr_t sc_find_module_by_name(const char* dll_name) {
+#if defined(_M_X64) || defined(__x86_64__)
+    PEB* peb = (PEB*)__readgsqword(0x60);
+#else
+    PEB* peb = (PEB*)__readfsdword(0x30);
+#endif
+    auto* ldr = peb->Ldr;
+    auto* head = &ldr->InMemoryOrderModuleList;
+    for (auto* entry = head->Flink; entry != head; entry = entry->Flink) {
+        auto* mod = CONTAINING_RECORD(entry, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks);
+        if (!mod->FullDllName.Buffer || mod->FullDllName.Length == 0) continue;
+        wchar_t* wname = mod->FullDllName.Buffer;
+        wchar_t* last_slash = wname;
+        for (wchar_t* p = wname; *p; p++)
+            if (*p == '\\' || *p == '/') last_slash = p + 1;
+        if (last_slash > wname) wname = last_slash;
+        // case-insensitive compare wide vs ascii
+        const char* a = dll_name;
+        wchar_t* w = wname;
+        bool match = true;
+        while (*a && *w) {
+            char ca = *a; char cw = (char)*w;
+            if (ca >= 'A' && ca <= 'Z') ca += 32;
+            if (cw >= 'A' && cw <= 'Z') cw += 32;
+            if (ca != cw) { match = false; break; }
+            a++; w++;
+        }
+        if (match && *a == 0 && *w == 0) return (uintptr_t)mod->DllBase;
+    }
+    return 0;
+}
+
+// find export by ASCII name (not hash) — for import table function names
+static uintptr_t sc_find_export_by_name(uintptr_t mod_base, const char* func_name) {
+    auto* dos = (IMAGE_DOS_HEADER*)mod_base;
+    auto* nt = (IMAGE_NT_HEADERS*)(mod_base + dos->e_lfanew);
+    auto& exp_dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (exp_dir.Size == 0) return 0;
+    auto* exp = (IMAGE_EXPORT_DIRECTORY*)(mod_base + exp_dir.VirtualAddress);
+    auto* names = (DWORD*)(mod_base + exp->AddressOfNames);
+    auto* ords = (WORD*)(mod_base + exp->AddressOfNameOrdinals);
+    auto* funcs = (DWORD*)(mod_base + exp->AddressOfFunctions);
+    for (DWORD i = 0; i < exp->NumberOfNames; i++) {
+        const char* fname = (const char*)(mod_base + names[i]);
+        const char* a = func_name; const char* b = fname;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (*a == 0 && *b == 0)
+            return mod_base + funcs[ords[i]];
+    }
+    return 0;
+}
+
+// find export by ordinal
+static uintptr_t sc_find_export_by_ordinal(uintptr_t mod_base, WORD ordinal) {
+    auto* dos = (IMAGE_DOS_HEADER*)mod_base;
+    auto* nt = (IMAGE_NT_HEADERS*)(mod_base + dos->e_lfanew);
+    auto& exp_dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (exp_dir.Size == 0) return 0;
+    auto* exp = (IMAGE_EXPORT_DIRECTORY*)(mod_base + exp_dir.VirtualAddress);
+    auto* funcs = (DWORD*)(mod_base + exp->AddressOfFunctions);
+    DWORD idx = ordinal - exp->Base;
+    if (idx >= exp->NumberOfFunctions) return 0;
+    return mod_base + funcs[idx];
+}
 
 static DWORD WINAPI ShellcodeLoader(MapperData* d) {
     uintptr_t base = d->imageBase;
     auto* nt = (IMAGE_NT_HEADERS*)(base + d->ntHeadersOffset);
 
-    // resolve kernel32 and ntdll from PEB
+    // resolve RtlAddFunctionTable from kernel32 or ntdll via hash
     uintptr_t kernel32 = sc_find_module(H_KERNEL32);
-    uintptr_t ntdll = sc_find_module(H_NTDLL);
+    uintptr_t ntdll_mod = sc_find_module(H_NTDLL);
     if (!kernel32) return 0xDEAD0001;
 
-    // get LoadLibraryA and GetProcAddress from export tables
-    typedef HMODULE(WINAPI* LoadLibraryA_t)(LPCSTR);
-    typedef FARPROC(WINAPI* GetProcAddress_t)(HMODULE, LPCSTR);
     typedef BOOLEAN(WINAPI* RtlAddFunctionTable_t)(PRUNTIME_FUNCTION, DWORD, DWORD64);
-
-    auto pLoadLibraryA = (LoadLibraryA_t)sc_find_export(kernel32, H_LOADLIBRARYA);
-    auto pGetProcAddress = (GetProcAddress_t)sc_find_export(kernel32, H_GETPROCADDRESS);
-    if (!pLoadLibraryA || !pGetProcAddress) return 0xDEAD0002;
-
-    auto pRtlAddFunctionTable = (RtlAddFunctionTable_t)0;
-    if (kernel32) pRtlAddFunctionTable = (RtlAddFunctionTable_t)sc_find_export(kernel32, H_RTLADDFUNCTABLE);
-    if (!pRtlAddFunctionTable && ntdll)
-        pRtlAddFunctionTable = (RtlAddFunctionTable_t)sc_find_export(ntdll, H_RTLADDFUNCTABLE);
+    auto pRtlAddFunctionTable = (RtlAddFunctionTable_t)sc_find_export(kernel32, H_RTLADDFUNCTABLE);
+    if (!pRtlAddFunctionTable && ntdll_mod)
+        pRtlAddFunctionTable = (RtlAddFunctionTable_t)sc_find_export(ntdll_mod, H_RTLADDFUNCTABLE);
 
     // relocations
     uintptr_t delta = base - nt->OptionalHeader.ImageBase;
@@ -182,26 +234,29 @@ static DWORD WINAPI ShellcodeLoader(MapperData* d) {
         }
     }
 
-    // imports — use PEB-resolved LoadLibraryA/GetProcAddress
+    // imports — PURE PEB walk, zero calls to LoadLibraryA or GetProcAddress
     auto& impDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (impDir.Size) {
         auto* imp = (IMAGE_IMPORT_DESCRIPTOR*)(base + impDir.VirtualAddress);
         while (imp->Name) {
-            HMODULE hm = pLoadLibraryA((char*)(base + imp->Name));
-            if (hm) {
+            const char* dll_name = (const char*)(base + imp->Name);
+            uintptr_t mod_base = sc_find_module_by_name(dll_name);
+            if (mod_base) {
                 auto* thk = (IMAGE_THUNK_DATA*)(base + imp->FirstThunk);
                 auto* ot = imp->OriginalFirstThunk
                     ? (IMAGE_THUNK_DATA*)(base + imp->OriginalFirstThunk) : thk;
                 while (ot->u1.AddressOfData) {
                     if (IMAGE_SNAP_BY_ORDINAL(ot->u1.Ordinal)) {
-                        thk->u1.Function = (uintptr_t)pGetProcAddress(
-                            hm, (LPCSTR)IMAGE_ORDINAL(ot->u1.Ordinal));
+                        thk->u1.Function = sc_find_export_by_ordinal(
+                            mod_base, (WORD)IMAGE_ORDINAL(ot->u1.Ordinal));
                     } else {
                         auto* ibn = (IMAGE_IMPORT_BY_NAME*)(base + ot->u1.AddressOfData);
-                        thk->u1.Function = (uintptr_t)pGetProcAddress(hm, ibn->Name);
+                        thk->u1.Function = sc_find_export_by_name(mod_base, ibn->Name);
                     }
                     thk++; ot++;
                 }
+            } else {
+                return 0xDEAD0003; // imported DLL not found in PEB
             }
             imp++;
         }
