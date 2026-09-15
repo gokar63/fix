@@ -26,7 +26,7 @@ namespace off {
     int ClassName = 0x8;
 
     // DataModel
-    int FDM_Pointer = 0x8E42C98;  // module-relative FakeDataModel pointer
+    int FDM_Pointer = 0x8DC2258;  // module-relative FakeDataModel pointer
     int FDM_DataModel = 0x1F8;    // FakeDataModel → RealDataModel
 
     // Players
@@ -41,8 +41,8 @@ namespace off {
 
     // BasePart → Primitive → Position
     int BasePart_Primitive = 0x188;
-    int Primitive_Position = 0xD4;
-    int Primitive_Rotation = 0xB0;
+    int Primitive_Position = 0xEC;
+    int Primitive_Rotation = 0xC8;
 
     // Humanoid
     int Health = 0x190;
@@ -54,7 +54,7 @@ namespace off {
 
     // VisualEngine
     int VE_ViewMatrix = 0x1B0;
-    int VE_Pointer = 0x846F768;    // module-relative
+    int VE_Pointer = 0x83F0A08;    // module-relative
 }
 
 // Try to load offsets.h values at runtime from a config file
