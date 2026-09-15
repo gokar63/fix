@@ -10,6 +10,7 @@
 #include <vector>
 #include <algorithm>
 #include <string>
+#include <cstring>
 #include <dwmapi.h>
 
 #pragma comment(lib, "dwmapi.lib")
@@ -82,8 +83,8 @@ bool match(uint8_t r, uint8_t g, uint8_t b) {
 
 std::vector<Target> detect(Screen& sc) {
     int mx=sc.w/2, my=sc.h/2;
-    int l=__max(0,mx-cfg.fov), r=__min(sc.w-1,mx+cfg.fov);
-    int t=__max(0,my-cfg.fov), b=__min(sc.h-1,my+cfg.fov);
+    int l=(std::max)(0,mx-cfg.fov), r=(std::min)(sc.w-1,mx+cfg.fov);
+    int t=(std::max)(0,my-cfg.fov), b=(std::min)(sc.h-1,my+cfg.fov);
     
     const int CELL=16;
     int gw=(r-l)/CELL+1, gh=(b-t)/CELL+1;
@@ -128,8 +129,8 @@ std::vector<Target> detect(Screen& sc) {
         if(tc>=cfg.min_cluster){
             Target tg;
             tg.cx=tx/tc; tg.cy=ty/tc; tg.pixels=tc;
-            tg.w=__max(cfg.esp_box_size,(xmax-xmin)+CELL*2);
-            tg.h=__max(cfg.esp_box_size,(ymax-ymin)+CELL*2);
+            tg.w=(std::max)(cfg.esp_box_size,(xmax-xmin)+CELL*2);
+            tg.h=(std::max)(cfg.esp_box_size,(ymax-ymin)+CELL*2);
             int ddx=tg.cx-mx, ddy=tg.cy-my;
             tg.dist=sqrtf((float)(ddx*ddx+ddy*ddy));
             targets.push_back(tg);
@@ -309,14 +310,14 @@ int esp_aimbot_main_impl() {
         if(f1&&!kf1){cfg.active=!cfg.active; printf("[*] %s\n",cfg.active?"ON":"OFF");} kf1=f1;
         
         bool f3=GetAsyncKeyState(VK_F3)&0x8000;
-        if(f3&&!kf3){cfg.fov=__max(50,cfg.fov-50);printf("[*] FOV:%d\n",cfg.fov);} kf3=f3;
+        if(f3&&!kf3){cfg.fov=(std::max)(50,cfg.fov-50);printf("[*] FOV:%d\n",cfg.fov);} kf3=f3;
         bool f4=GetAsyncKeyState(VK_F4)&0x8000;
-        if(f4&&!kf4){cfg.fov=__min(800,cfg.fov+50);printf("[*] FOV:%d\n",cfg.fov);} kf4=f4;
+        if(f4&&!kf4){cfg.fov=(std::min)(800,cfg.fov+50);printf("[*] FOV:%d\n",cfg.fov);} kf4=f4;
         
         bool f5=GetAsyncKeyState(VK_F5)&0x8000;
-        if(f5&&!kf5){cfg.smoothing=__max(1.0f,cfg.smoothing-0.5f);printf("[*] Smooth:%.1f\n",cfg.smoothing);} kf5=f5;
+        if(f5&&!kf5){cfg.smoothing=(std::max)(1.0f,cfg.smoothing-0.5f);printf("[*] Smooth:%.1f\n",cfg.smoothing);} kf5=f5;
         bool f6=GetAsyncKeyState(VK_F6)&0x8000;
-        if(f6&&!kf6){cfg.smoothing=__min(10.0f,cfg.smoothing+0.5f);printf("[*] Smooth:%.1f\n",cfg.smoothing);} kf6=f6;
+        if(f6&&!kf6){cfg.smoothing=(std::min)(10.0f,cfg.smoothing+0.5f);printf("[*] Smooth:%.1f\n",cfg.smoothing);} kf6=f6;
         
         bool f7=GetAsyncKeyState(VK_F7)&0x8000;
         if(f7&&!kf7){cfg.esp_enabled=!cfg.esp_enabled;printf("[*] ESP:%s\n",cfg.esp_enabled?"ON":"OFF");} kf7=f7;
