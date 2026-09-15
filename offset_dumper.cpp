@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <set>
 #include <map>
+#include <algorithm>
 
 // ================================================================
 // HELPERS
@@ -121,9 +122,12 @@ static void scan_task_scheduler(HANDLE proc, const std::vector<MemRegion>& regio
         {0xC0, 0xC8}, {0x1D0, 0x1D8}
     };
 
+    DWORD scan_start = GetTickCount();
     int checked = 0;
     for (auto& reg : regions) {
         if (reg.size < 16) continue;
+        // Skip very large non-module regions for TS scan
+        if (reg.size > 16 * 1024 * 1024) { checked++; continue; }
         for (size_t off = 0; off + 8 <= reg.size; off += 8) {
             uintptr_t val = *(uintptr_t*)(reg.data.data() + off);
             if (val < 0x10000 || val > 0x7FFFFFFFFFFF) continue;
@@ -162,7 +166,6 @@ static void scan_task_scheduler(HANDLE proc, const std::vector<MemRegion>& regio
                     printf("\n");
                     printf("    Jobs: [0x%X, 0x%X] (%d jobs)\n", p[0], p[1], jc);
 
-                    // List jobs
                     for (uintptr_t j = js; j < je && j < js + 0x1000; j += 8) {
                         uintptr_t jp = rpm<uintptr_t>(proc, j);
                         if (jp < 0x10000) continue;
@@ -174,7 +177,15 @@ static void scan_task_scheduler(HANDLE proc, const std::vector<MemRegion>& regio
             }
         }
         checked++;
-        if (checked % 100 == 0) printf("    %d/%zu regions...\n", checked, regions.size());
+        if (checked % 50 == 0) {
+            DWORD elapsed = (GetTickCount() - scan_start) / 1000;
+            printf("    %d/%zu regions... (%lus)\n", checked, regions.size(), elapsed);
+        }
+        // Timeout after 120 seconds
+        if ((GetTickCount() - scan_start) > 120000) {
+            printf("[!] TaskScheduler scan timeout (120s) — skipping\n");
+            break;
+        }
     }
     printf("[!] TaskScheduler not found\n");
 }
@@ -189,9 +200,11 @@ static void scan_datamodel(HANDLE proc, const std::vector<MemRegion>& regions, u
     int ch_list[] = {0x78, 0x80, 0x50, 0x70, 0x88};
     int nm_list[] = {0x70, 0x48, 0x68, 0x50, 0x78};
 
+    DWORD dm_scan_start = GetTickCount();
     int checked = 0;
     for (auto& reg : regions) {
         if (reg.size < 16) continue;
+        if (reg.size > 16 * 1024 * 1024) { checked++; continue; }
         for (size_t off = 0; off + 8 <= reg.size; off += 8) {
             uintptr_t fdm = *(uintptr_t*)(reg.data.data() + off);
             if (fdm < 0x10000 || fdm > 0x7FFFFFFFFFFF) continue;
@@ -398,7 +411,14 @@ static void scan_datamodel(HANDLE proc, const std::vector<MemRegion>& regions, u
             }
         }
         checked++;
-        if (checked % 100 == 0) printf("    %d/%zu regions...\n", checked, regions.size());
+        if (checked % 50 == 0) {
+            DWORD elapsed = (GetTickCount() - dm_scan_start) / 1000;
+            printf("    %d/%zu regions... (%lus)\n", checked, regions.size(), elapsed);
+        }
+        if ((GetTickCount() - dm_scan_start) > 120000) {
+            printf("[!] DataModel scan timeout (120s) — skipping\n");
+            break;
+        }
     }
     printf("[!] DataModel not found\n");
 }
@@ -511,13 +531,23 @@ int main() {
 
     MEMORY_BASIC_INFORMATION mbi{};
     uintptr_t addr = 0x10000;
+    uintptr_t mod_end = base + mi.SizeOfImage;
     while (VirtualQueryEx(proc, (LPCVOID)addr, &mbi, sizeof(mbi))) {
         if (mbi.State == MEM_COMMIT &&
             (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ |
                             PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) &&
             !(mbi.Protect & PAGE_GUARD)) {
+            uintptr_t rbase = (uintptr_t)mbi.BaseAddress;
+            uintptr_t rend = rbase + mbi.RegionSize;
+            // Prioritize: module regions first, then heap (skip huge regions > 64MB)
+            bool in_module = (rbase >= base && rbase < mod_end);
+            if (!in_module && mbi.RegionSize > 64 * 1024 * 1024) {
+                addr = rend;
+                if (addr < rbase) break;
+                continue;
+            }
             MemRegion r;
-            r.base = (uintptr_t)mbi.BaseAddress;
+            r.base = rbase;
             r.size = mbi.RegionSize;
             r.data.resize(r.size);
             SIZE_T rd = 0;
@@ -531,6 +561,13 @@ int main() {
         addr = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
         if (addr < (uintptr_t)mbi.BaseAddress) break;
     }
+    // Sort: module regions first for faster scanning
+    std::sort(regions.begin(), regions.end(), [&](const MemRegion& a, const MemRegion& b) {
+        bool a_mod = (a.base >= base && a.base < mod_end);
+        bool b_mod = (b.base >= base && b.base < mod_end);
+        if (a_mod != b_mod) return a_mod;
+        return a.base < b.base;
+    });
     printf("[+] Read %zu regions, %zu MB\n\n", regions.size(), total / (1024 * 1024));
 
     // Scan
