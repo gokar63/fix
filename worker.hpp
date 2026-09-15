@@ -236,7 +236,10 @@ struct SimpleClient {
 };
 
 class bytecode_encoder_t : public Luau::BytecodeEncoder {
-    inline void encode(uint32_t* data, size_t count) override {
+    uint8_t encodeOp(uint8_t op) override {
+        return op * 227;
+    }
+    void encode(uint32_t* data, size_t count) override {
         for (auto i = 0u; i < count;) {
             auto& opcode = *reinterpret_cast<uint8_t*>(data + i);
             i += Luau::getOpLength(LuauOpcode(opcode));
