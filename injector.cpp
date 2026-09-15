@@ -1,6 +1,6 @@
 // language: C++17, file: injector.cpp, target: Windows 11 x64, MSVC
-// Manual Map Injector — bypasses Byfron code integrity (NtCreateSection check)
-// Maps PE sections directly, fixes relocs/imports, calls entry via NtCreateThreadEx
+// Manual Map Injector — bypasses Byfron code integrity
+// Shellcode resolves imports via PEB walk (no LoadLibraryA/GetProcAddress calls)
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -48,60 +48,157 @@ static std::vector<uint8_t> read_file(const std::string& path) {
 
 // ================================================================
 // SHELLCODE — runs inside target process
+// Resolves everything via PEB walk, zero calls to hooked APIs
 // ================================================================
 struct MapperData {
     uintptr_t imageBase;
     uintptr_t ntHeadersOffset;
-    HMODULE  (WINAPI* fnLoadLibraryA)(LPCSTR);
-    FARPROC  (WINAPI* fnGetProcAddress)(HMODULE, LPCSTR);
-    BOOLEAN  (WINAPI* fnRtlAddFunctionTable)(PRUNTIME_FUNCTION, DWORD, DWORD64);
 };
 
 #pragma optimize("", off)
 #pragma runtime_checks("", off)
+
+// djb2-style hash for case-insensitive module/function name matching
+static DWORD sc_hash(const char* s) {
+    DWORD h = 5381;
+    while (*s) {
+        char c = *s++;
+        if (c >= 'A' && c <= 'Z') c += 32;
+        h = ((h << 5) + h) + (DWORD)c;
+    }
+    return h;
+}
+
+static DWORD sc_hash_w(const wchar_t* s) {
+    DWORD h = 5381;
+    while (*s) {
+        char c = (char)*s++;
+        if (c >= 'A' && c <= 'Z') c += 32;
+        h = ((h << 5) + h) + (DWORD)c;
+    }
+    return h;
+}
+
+// walk PEB->Ldr to find a loaded module by name hash
+static uintptr_t sc_find_module(DWORD name_hash) {
+#if defined(_M_X64) || defined(__x86_64__)
+    PEB* peb = (PEB*)__readgsqword(0x60);
+#else
+    PEB* peb = (PEB*)__readfsdword(0x30);
+#endif
+    auto* ldr = peb->Ldr;
+    auto* head = &ldr->InMemoryOrderModuleList;
+    for (auto* entry = head->Flink; entry != head; entry = entry->Flink) {
+        auto* mod = CONTAINING_RECORD(entry, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks);
+        if (mod->FullDllName.Buffer && mod->FullDllName.Length > 0) {
+            // extract just the filename from the full path
+            wchar_t* name = mod->FullDllName.Buffer;
+            wchar_t* last_slash = name;
+            for (wchar_t* p = name; *p; p++)
+                if (*p == '\\' || *p == '/') last_slash = p + 1;
+            if (last_slash > name) name = last_slash;
+            if (sc_hash_w(name) == name_hash)
+                return (uintptr_t)mod->DllBase;
+        }
+    }
+    return 0;
+}
+
+// parse a module's export table to find a function by name hash
+static uintptr_t sc_find_export(uintptr_t mod_base, DWORD func_hash) {
+    auto* dos = (IMAGE_DOS_HEADER*)mod_base;
+    auto* nt = (IMAGE_NT_HEADERS*)(mod_base + dos->e_lfanew);
+    auto& exp_dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (exp_dir.Size == 0) return 0;
+
+    auto* exp = (IMAGE_EXPORT_DIRECTORY*)(mod_base + exp_dir.VirtualAddress);
+    auto* names = (DWORD*)(mod_base + exp->AddressOfNames);
+    auto* ords = (WORD*)(mod_base + exp->AddressOfNameOrdinals);
+    auto* funcs = (DWORD*)(mod_base + exp->AddressOfFunctions);
+
+    for (DWORD i = 0; i < exp->NumberOfNames; i++) {
+        const char* fname = (const char*)(mod_base + names[i]);
+        if (sc_hash(fname) == func_hash)
+            return mod_base + funcs[ords[i]];
+    }
+    return 0;
+}
+
+// pre-computed hashes (djb2 lowercase)
+// kernel32.dll = 0x6DDB9555
+// ntdll.dll    = 0x1EDAB0ED
+// LoadLibraryA = 0xB7072FF0
+// GetProcAddress = 0x1FC0EAEE
+// RtlAddFunctionTable = 0xA5670B3F
+
+#define H_KERNEL32        0x6DDB9555u
+#define H_NTDLL           0x1EDAB0EDu
+#define H_LOADLIBRARYA    0xB7072FF0u
+#define H_GETPROCADDRESS  0x1FC0EAEEu
+#define H_RTLADDFUNCTABLE 0xA5670B3Fu
+
 static DWORD WINAPI ShellcodeLoader(MapperData* d) {
     uintptr_t base = d->imageBase;
-    auto nt = (PIMAGE_NT_HEADERS)(base + d->ntHeadersOffset);
+    auto* nt = (IMAGE_NT_HEADERS*)(base + d->ntHeadersOffset);
+
+    // resolve kernel32 and ntdll from PEB
+    uintptr_t kernel32 = sc_find_module(H_KERNEL32);
+    uintptr_t ntdll = sc_find_module(H_NTDLL);
+    if (!kernel32) return 0xDEAD0001;
+
+    // get LoadLibraryA and GetProcAddress from export tables
+    typedef HMODULE(WINAPI* LoadLibraryA_t)(LPCSTR);
+    typedef FARPROC(WINAPI* GetProcAddress_t)(HMODULE, LPCSTR);
+    typedef BOOLEAN(WINAPI* RtlAddFunctionTable_t)(PRUNTIME_FUNCTION, DWORD, DWORD64);
+
+    auto pLoadLibraryA = (LoadLibraryA_t)sc_find_export(kernel32, H_LOADLIBRARYA);
+    auto pGetProcAddress = (GetProcAddress_t)sc_find_export(kernel32, H_GETPROCADDRESS);
+    if (!pLoadLibraryA || !pGetProcAddress) return 0xDEAD0002;
+
+    auto pRtlAddFunctionTable = (RtlAddFunctionTable_t)0;
+    if (kernel32) pRtlAddFunctionTable = (RtlAddFunctionTable_t)sc_find_export(kernel32, H_RTLADDFUNCTABLE);
+    if (!pRtlAddFunctionTable && ntdll)
+        pRtlAddFunctionTable = (RtlAddFunctionTable_t)sc_find_export(ntdll, H_RTLADDFUNCTABLE);
 
     // relocations
     uintptr_t delta = base - nt->OptionalHeader.ImageBase;
     if (delta) {
         auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
         if (dir.Size) {
-            auto blk = (PIMAGE_BASE_RELOCATION)(base + dir.VirtualAddress);
+            auto* blk = (IMAGE_BASE_RELOCATION*)(base + dir.VirtualAddress);
             while (blk->VirtualAddress) {
                 DWORD cnt = (blk->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
                 WORD* ent = (WORD*)((BYTE*)blk + sizeof(IMAGE_BASE_RELOCATION));
                 for (DWORD i = 0; i < cnt; i++) {
                     WORD type = ent[i] >> 12;
-                    WORD off  = ent[i] & 0xFFF;
+                    WORD off = ent[i] & 0xFFF;
                     if (type == IMAGE_REL_BASED_DIR64)
                         *(uintptr_t*)(base + blk->VirtualAddress + off) += delta;
                     else if (type == IMAGE_REL_BASED_HIGHLOW)
                         *(DWORD*)(base + blk->VirtualAddress + off) += (DWORD)delta;
                 }
-                blk = (PIMAGE_BASE_RELOCATION)((BYTE*)blk + blk->SizeOfBlock);
+                blk = (IMAGE_BASE_RELOCATION*)((BYTE*)blk + blk->SizeOfBlock);
             }
         }
     }
 
-    // imports
+    // imports — use PEB-resolved LoadLibraryA/GetProcAddress
     auto& impDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (impDir.Size) {
-        auto imp = (PIMAGE_IMPORT_DESCRIPTOR)(base + impDir.VirtualAddress);
+        auto* imp = (IMAGE_IMPORT_DESCRIPTOR*)(base + impDir.VirtualAddress);
         while (imp->Name) {
-            HMODULE hm = d->fnLoadLibraryA((char*)(base + imp->Name));
+            HMODULE hm = pLoadLibraryA((char*)(base + imp->Name));
             if (hm) {
-                auto thk = (PIMAGE_THUNK_DATA)(base + imp->FirstThunk);
-                auto ot  = imp->OriginalFirstThunk
-                    ? (PIMAGE_THUNK_DATA)(base + imp->OriginalFirstThunk) : thk;
+                auto* thk = (IMAGE_THUNK_DATA*)(base + imp->FirstThunk);
+                auto* ot = imp->OriginalFirstThunk
+                    ? (IMAGE_THUNK_DATA*)(base + imp->OriginalFirstThunk) : thk;
                 while (ot->u1.AddressOfData) {
                     if (IMAGE_SNAP_BY_ORDINAL(ot->u1.Ordinal)) {
-                        thk->u1.Function = (uintptr_t)d->fnGetProcAddress(
+                        thk->u1.Function = (uintptr_t)pGetProcAddress(
                             hm, (LPCSTR)IMAGE_ORDINAL(ot->u1.Ordinal));
                     } else {
-                        auto ibn = (PIMAGE_IMPORT_BY_NAME)(base + ot->u1.AddressOfData);
-                        thk->u1.Function = (uintptr_t)d->fnGetProcAddress(hm, ibn->Name);
+                        auto* ibn = (IMAGE_IMPORT_BY_NAME*)(base + ot->u1.AddressOfData);
+                        thk->u1.Function = (uintptr_t)pGetProcAddress(hm, ibn->Name);
                     }
                     thk++; ot++;
                 }
@@ -110,11 +207,11 @@ static DWORD WINAPI ShellcodeLoader(MapperData* d) {
         }
     }
 
-    // exception table — needed for SEH (__try/__except) in mapped code
-    if (d->fnRtlAddFunctionTable) {
+    // exception table
+    if (pRtlAddFunctionTable) {
         auto& exc = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
         if (exc.Size)
-            d->fnRtlAddFunctionTable(
+            pRtlAddFunctionTable(
                 (PRUNTIME_FUNCTION)(base + exc.VirtualAddress),
                 exc.Size / sizeof(RUNTIME_FUNCTION), (DWORD64)base);
     }
@@ -122,15 +219,15 @@ static DWORD WINAPI ShellcodeLoader(MapperData* d) {
     // TLS callbacks
     auto& tlsDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
     if (tlsDir.Size) {
-        auto tls = (PIMAGE_TLS_DIRECTORY)(base + tlsDir.VirtualAddress);
-        auto cb = (PIMAGE_TLS_CALLBACK*)tls->AddressOfCallBacks;
+        auto* tls = (IMAGE_TLS_DIRECTORY*)(base + tlsDir.VirtualAddress);
+        auto* cb = (PIMAGE_TLS_CALLBACK*)tls->AddressOfCallBacks;
         if (cb) while (*cb) { (*cb)((PVOID)base, DLL_PROCESS_ATTACH, nullptr); cb++; }
     }
 
     // DllMain
     if (nt->OptionalHeader.AddressOfEntryPoint) {
-        typedef BOOL(WINAPI* fn_t)(HINSTANCE, DWORD, LPVOID);
-        auto ep = (fn_t)(base + nt->OptionalHeader.AddressOfEntryPoint);
+        typedef BOOL(WINAPI* DllMain_t)(HINSTANCE, DWORD, LPVOID);
+        auto ep = (DllMain_t)(base + nt->OptionalHeader.AddressOfEntryPoint);
         ep((HINSTANCE)base, DLL_PROCESS_ATTACH, nullptr);
     }
 
@@ -148,8 +245,8 @@ typedef NTSTATUS(NTAPI* NtCreateThreadEx_t)(
     ULONG, SIZE_T, SIZE_T, SIZE_T, PVOID);
 
 static HANDLE create_remote_thread(HANDLE proc, LPVOID start, LPVOID param) {
-    auto ntdll = GetModuleHandleA("ntdll.dll");
-    auto fn = (NtCreateThreadEx_t)GetProcAddress(ntdll, "NtCreateThreadEx");
+    auto ntdll_mod = GetModuleHandleA("ntdll.dll");
+    auto fn = (NtCreateThreadEx_t)GetProcAddress(ntdll_mod, "NtCreateThreadEx");
     if (fn) {
         HANDLE thread = nullptr;
         NTSTATUS st = fn(&thread, THREAD_ALL_ACCESS, nullptr, proc,
@@ -168,7 +265,7 @@ int main() {
     printf("\n");
     printf("  +================================+\n");
     printf("  |  VANTA Manual Map Injector      |\n");
-    printf("  |  Bypasses code integrity check  |\n");
+    printf("  |  PEB-walk shellcode (no hooks)  |\n");
     printf("  +================================+\n\n");
 
     enable_debug();
@@ -192,12 +289,11 @@ int main() {
     }
     printf("[+] DLL size: %zu bytes\n", pe_data.size());
 
-    // validate PE
-    auto dos = (PIMAGE_DOS_HEADER)pe_data.data();
+    auto* dos = (PIMAGE_DOS_HEADER)pe_data.data();
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
         printf("[!] Invalid DOS header\n"); system("pause"); return 1;
     }
-    auto nt = (PIMAGE_NT_HEADERS)(pe_data.data() + dos->e_lfanew);
+    auto* nt = (PIMAGE_NT_HEADERS)(pe_data.data() + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE) {
         printf("[!] Invalid NT header\n"); system("pause"); return 1;
     }
@@ -225,7 +321,6 @@ int main() {
         system("pause"); return 1;
     }
 
-    // allocate in target
     SIZE_T img_size = nt->OptionalHeader.SizeOfImage;
     LPVOID remote_base = VirtualAllocEx(proc, nullptr, img_size,
         MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -235,12 +330,10 @@ int main() {
     }
     printf("[+] Allocated 0x%zX bytes at %p\n", img_size, remote_base);
 
-    // write PE headers
     WriteProcessMemory(proc, remote_base, pe_data.data(),
         nt->OptionalHeader.SizeOfHeaders, nullptr);
 
-    // write sections
-    auto sec = IMAGE_FIRST_SECTION(nt);
+    auto* sec = IMAGE_FIRST_SECTION(nt);
     for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
         if (sec[i].SizeOfRawData == 0) continue;
         WriteProcessMemory(proc,
@@ -250,23 +343,15 @@ int main() {
     }
     printf("[+] PE sections written\n");
 
-    // prepare mapper data
+    // mapper data — only imageBase and ntHeadersOffset needed now
     MapperData md{};
     md.imageBase = (uintptr_t)remote_base;
     md.ntHeadersOffset = (uintptr_t)dos->e_lfanew;
-    md.fnLoadLibraryA = (decltype(md.fnLoadLibraryA))
-        GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryA");
-    md.fnGetProcAddress = (decltype(md.fnGetProcAddress))
-        GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetProcAddress");
-    md.fnRtlAddFunctionTable = (decltype(md.fnRtlAddFunctionTable))
-        GetProcAddress(GetModuleHandleA("kernel32.dll"), "RtlAddFunctionTable");
-    if (!md.fnRtlAddFunctionTable)
-        md.fnRtlAddFunctionTable = (decltype(md.fnRtlAddFunctionTable))
-            GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlAddFunctionTable");
 
-    // write shellcode + data to target
+    // shellcode size
     size_t sc_size = (BYTE*)ShellcodeLoaderEnd - (BYTE*)ShellcodeLoader;
-    if (sc_size == 0 || sc_size > 0x10000) sc_size = 0x1000; // safety fallback
+    if (sc_size == 0 || sc_size > 0x10000) sc_size = 0x4000;
+    printf("[+] Shellcode size: %zu bytes\n", sc_size);
 
     size_t alloc_size = sc_size + sizeof(MapperData) + 64;
     LPVOID remote_sc = VirtualAllocEx(proc, nullptr, alloc_size,
@@ -277,15 +362,13 @@ int main() {
         CloseHandle(proc); system("pause"); return 1;
     }
 
-    // data at start, shellcode after
     LPVOID remote_data = remote_sc;
     LPVOID remote_code = (BYTE*)remote_sc + sizeof(MapperData) + 16;
 
     WriteProcessMemory(proc, remote_data, &md, sizeof(md), nullptr);
-    WriteProcessMemory(proc, remote_code, ShellcodeLoader, sc_size, nullptr);
+    WriteProcessMemory(proc, remote_code, (void*)ShellcodeLoader, sc_size, nullptr);
     printf("[+] Shellcode written at %p (%zu bytes)\n", remote_code, sc_size);
 
-    // execute
     HANDLE thread = create_remote_thread(proc, remote_code, remote_data);
     if (!thread) {
         printf("[!] Thread creation failed (%lu)\n", GetLastError());
@@ -295,7 +378,7 @@ int main() {
     }
 
     printf("[+] Loader thread started, waiting...\n");
-    DWORD wait = WaitForSingleObject(thread, 15000);
+    DWORD wait = WaitForSingleObject(thread, 30000);
     if (wait == WAIT_TIMEOUT) {
         printf("[!] Loader timed out — DLL may still be initializing\n");
     } else {
@@ -309,7 +392,6 @@ int main() {
 
     printf("[+] Press INSERT in-game for the menu.\n");
 
-    // cleanup (leave mapped image + shellcode — DLL is running)
     CloseHandle(thread);
     CloseHandle(proc);
 
