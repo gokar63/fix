@@ -5,6 +5,7 @@
 #include <regex>
 #include <tlhelp32.h>
 #include <fstream>
+#include <sstream>
 #include <mutex>
 
 #include <xxhash.h>
