@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <cstring>
 
+namespace aimbot_ns {
+
 // ================================================================
 // CONFIG
 // ================================================================
@@ -284,7 +286,7 @@ static void pick_color(const ScreenCapture& sc) {
 // MAIN
 // ================================================================
 
-int main() {
+int aimbot_main_impl() {
     printf("\n");
     printf("  VANTA Aim Tracker\n");
     printf("  =================\n\n");
@@ -388,3 +390,6 @@ int main() {
     printf("\n[*] done\n");
     return 0;
 }
+} // namespace aimbot_ns
+
+int aimbot_main() { return aimbot_ns::aimbot_main_impl(); }

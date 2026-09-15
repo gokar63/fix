@@ -13,6 +13,8 @@
 #include <filesystem>
 #include <set>
 
+namespace dumper_ns {
+
 static DWORD find_pid(const wchar_t* n) {
     HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     PROCESSENTRY32W pe{}; pe.dwSize = sizeof(pe); DWORD pid = 0;
@@ -47,7 +49,7 @@ static void enable_debug() {
 
 struct MemRegion { uintptr_t base; size_t size; std::vector<uint8_t> data; };
 
-int main() {
+int dumper_main_impl() {
     printf("\n  VANTA Offset Dumper v3\n  =====================\n\n");
     enable_debug();
     
@@ -281,3 +283,6 @@ done:
     system("pause");
     return 0;
 }
+} // namespace dumper_ns
+
+int dumper_main() { return dumper_ns::dumper_main_impl(); }

@@ -14,6 +14,8 @@
 
 #pragma comment(lib, "dwmapi.lib")
 
+namespace esp_ns {
+
 // ================================================================
 // CONFIG
 // ================================================================
@@ -254,7 +256,7 @@ void pick(Screen& sc) {
 // ================================================================
 // MAIN
 // ================================================================
-int main() {
+int esp_aimbot_main_impl() {
     printf("\n  VANTA ESP + Aimbot\n  ==================\n\n");
     printf("  Controls:\n");
     printf("    Right Click  = aim at closest\n");
@@ -349,3 +351,6 @@ done:
     DestroyWindow(ovl);
     return 0;
 }
+} // namespace esp_ns
+
+int esp_aimbot_main() { return esp_ns::esp_aimbot_main_impl(); }

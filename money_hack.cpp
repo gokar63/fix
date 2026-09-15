@@ -13,6 +13,8 @@
 #include <string>
 #include <algorithm>
 
+namespace money_ns {
+
 static DWORD find_pid(const wchar_t* n) {
     HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     PROCESSENTRY32W pe{}; pe.dwSize = sizeof(pe); DWORD pid = 0;
@@ -84,7 +86,7 @@ bool write_value(HANDLE proc, uintptr_t addr, T val) {
     return ok && written == sizeof(T);
 }
 
-int main() {
+int money_hack_main_impl() {
     printf("\n");
     printf("  VANTA Value Editor\n");
     printf("  ==================\n\n");
@@ -228,3 +230,6 @@ int main() {
     CloseHandle(proc);
     return 0;
 }
+} // namespace money_ns
+
+int money_hack_main() { return money_ns::money_hack_main_impl(); }

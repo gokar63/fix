@@ -189,7 +189,8 @@ static bool enableDebugPrivilege() {
     return GetLastError() == ERROR_SUCCESS;
 }
 
-int main() {
+int executor_main();
+int executor_main() {
     SetConsoleTitleA("VANTA Xeno Executor");
     printf("\n");
     printf("  ╔══════════════════════════════════╗\n");

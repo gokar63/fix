@@ -31,32 +31,25 @@ FetchContent_MakeAvailable(zstd)
 # Luau sources
 file(GLOB LUAU_SRC "Luau/src/*.cpp")
 
-# Xeno Executor
-add_executable(xeno main.cpp worker.cpp ntdll.cpp ${LUAU_SRC})
-target_include_directories(xeno PRIVATE
+# Unified Suite — all tools in one exe
+add_executable(xeno_suite
+    xeno_suite.cpp
+    main.cpp worker.cpp ntdll.cpp
+    esp_aimbot.cpp
+    aimbot.cpp
+    money_hack.cpp
+    dumper.cpp
+    ${LUAU_SRC}
+)
+target_include_directories(xeno_suite PRIVATE
     .
     Luau/include
     Luau/include/Luau
     Luau/src
 )
-target_link_libraries(xeno PRIVATE
+target_link_libraries(xeno_suite PRIVATE
     xxhash
     libzstd_static
     psapi advapi32 ole32 oleaut32 uuid
+    gdi32 dwmapi user32
 )
-
-# ESP + Aimbot
-add_executable(esp_aimbot esp_aimbot.cpp)
-target_link_libraries(esp_aimbot PRIVATE gdi32 dwmapi psapi advapi32 user32)
-
-# Aimbot
-add_executable(aimbot aimbot.cpp)
-target_link_libraries(aimbot PRIVATE gdi32 psapi advapi32 user32)
-
-# Money Hack
-add_executable(money_hack money_hack.cpp)
-target_link_libraries(money_hack PRIVATE psapi advapi32)
-
-# Dumper
-add_executable(dumper dumper.cpp)
-target_link_libraries(dumper PRIVATE psapi advapi32)
