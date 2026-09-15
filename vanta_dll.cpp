@@ -19,29 +19,42 @@
 // ================================================================
 namespace off {
     // Instance
-    int Name = 0x70;
-    int Children = 0x78;
+    int Name = 0x70;           // Instance::NameContainer
+    int Children = 0x78;       // Instance::ChildrenStart
     int Parent = 0x68;
     int ClassDescriptor = 0x18;
     int ClassName = 0x8;
 
     // DataModel
-    int FDM_DataModel = 0x1F8;
+    int FDM_Pointer = 0x8E42C98;  // module-relative FakeDataModel pointer
+    int FDM_DataModel = 0x1F8;    // FakeDataModel → RealDataModel
 
     // Players
     int LocalPlayer = 0x130;
 
-    // Camera
-    int Camera_ViewMatrix = 0x150;
+    // Workspace
+    int Workspace_CurrentCamera = 0x4B8;
 
-    // BasePart
-    int CFrame = 0x110;
+    // Camera
+    int Camera_Position = 0xFC;
+    int Camera_Rotation = 0xD8;
+
+    // BasePart → Primitive → Position
+    int BasePart_Primitive = 0x188;
+    int Primitive_Position = 0xD4;
+    int Primitive_Rotation = 0xB0;
 
     // Humanoid
-    int Health = 0x228;
+    int Health = 0x190;
+    int MaxHealth = 0x1A8;
+    int Walkspeed = 0x1D0;
 
     // Character ref on Player instance
-    int Player_Character = 0x100;
+    int Player_Character = 0x298;  // Player::ModelInstance
+
+    // VisualEngine
+    int VE_ViewMatrix = 0x1B0;
+    int VE_Pointer = 0x846F768;    // module-relative
 }
 
 // Try to load offsets.h values at runtime from a config file
@@ -63,12 +76,18 @@ static void load_offsets_config() {
             if (k == "Name") off::Name = val;
             else if (k == "Children") off::Children = val;
             else if (k == "Parent") off::Parent = val;
+            else if (k == "FDM_Pointer") off::FDM_Pointer = val;
             else if (k == "FDM_DataModel") off::FDM_DataModel = val;
             else if (k == "LocalPlayer") off::LocalPlayer = val;
-            else if (k == "Camera_ViewMatrix") off::Camera_ViewMatrix = val;
-            else if (k == "CFrame") off::CFrame = val;
+            else if (k == "Workspace_CurrentCamera") off::Workspace_CurrentCamera = val;
+            else if (k == "Camera_Position") off::Camera_Position = val;
+            else if (k == "BasePart_Primitive") off::BasePart_Primitive = val;
+            else if (k == "Primitive_Position") off::Primitive_Position = val;
             else if (k == "Health") off::Health = val;
+            else if (k == "MaxHealth") off::MaxHealth = val;
             else if (k == "Player_Character") off::Player_Character = val;
+            else if (k == "VE_ViewMatrix") off::VE_ViewMatrix = val;
+            else if (k == "VE_Pointer") off::VE_Pointer = val;
         }
     }
     fclose(f);
@@ -140,6 +159,13 @@ static uintptr_t find_child_class(uintptr_t inst, const std::string& cls) {
     return 0;
 }
 
+// Read position via BasePart → Primitive → Position
+static Vec3 get_part_position(uintptr_t part) {
+    uintptr_t prim = mem<uintptr_t>(part + off::BasePart_Primitive);
+    if (prim < 0x10000) return {0, 0, 0};
+    return mem<Vec3>(prim + off::Primitive_Position);
+}
+
 // ================================================================
 // MATH
 // ================================================================
@@ -200,11 +226,28 @@ static int g_screen_w = 0, g_screen_h = 0;
 // DATAMODEL FINDER — scans from inside the process
 // ================================================================
 static uintptr_t find_datamodel() {
-    // Scan .data section for FakeDataModel pointer
     HMODULE hmod = GetModuleHandleA(nullptr);
     if (!hmod) return 0;
     uintptr_t base = (uintptr_t)hmod;
 
+    // Direct path: module_base + FDM_Pointer → FakeDataModel → RealDataModel
+    uintptr_t fdm_ptr = mem<uintptr_t>(base + off::FDM_Pointer);
+    if (fdm_ptr > 0x10000 && fdm_ptr < 0x7FFFFFFFFFFF) {
+        uintptr_t dm = mem<uintptr_t>(fdm_ptr + off::FDM_DataModel);
+        if (dm > 0x10000) {
+            auto ch = get_children(dm);
+            int known = 0;
+            for (auto c : ch) {
+                std::string n = inst_name(c);
+                if (n == "Workspace" || n == "Players" || n == "Lighting" ||
+                    n == "ReplicatedStorage" || n == "StarterGui")
+                    known++;
+            }
+            if (known >= 3) return dm;
+        }
+    }
+
+    // Fallback: scan .data/.rdata sections
     PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)base;
     PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(base + dos->e_lfanew);
     PIMAGE_SECTION_HEADER sec = IMAGE_FIRST_SECTION(nt);
@@ -261,13 +304,19 @@ static void scanner_thread() {
 
         std::string local_name = inst_name(local_player);
 
-        // Get camera
-        uintptr_t camera = find_child_class(workspace, "Camera");
+        // Get camera via Workspace::CurrentCamera offset
+        uintptr_t camera = mem<uintptr_t>(workspace + off::Workspace_CurrentCamera);
+        if (camera < 0x10000) camera = find_child_class(workspace, "Camera");
         Matrix4 vm{};
         Vec3 cam_pos{};
-        if (camera) {
-            vm = mem<Matrix4>(camera + off::Camera_ViewMatrix);
-            cam_pos = mem<Vec3>(camera + off::CFrame);
+        if (camera && camera > 0x10000) {
+            cam_pos = mem<Vec3>(camera + off::Camera_Position);
+            // ViewMatrix: try VisualEngine path first
+            HMODULE hmod = GetModuleHandleA(nullptr);
+            if (hmod) {
+                uintptr_t ve = mem<uintptr_t>((uintptr_t)hmod + off::VE_Pointer);
+                if (ve > 0x10000) vm = mem<Matrix4>(ve + off::VE_ViewMatrix);
+            }
         }
 
         // Enumerate players
@@ -277,26 +326,22 @@ static void scanner_thread() {
             std::string pname = inst_name(p);
             if (pname.empty() || pname == local_name) continue;
 
-            // Find character — try known offsets
-            uintptr_t character = 0;
-            for (int co = off::Player_Character; co <= off::Player_Character + 0x40; co += 8) {
-                uintptr_t ch = mem<uintptr_t>(p + co);
-                if (ch < 0x10000) continue;
-                if (find_child(ch, "HumanoidRootPart")) { character = ch; break; }
-            }
-            if (!character) continue;
+            // Character via Player::Character offset
+            uintptr_t character = mem<uintptr_t>(p + off::Player_Character);
+            if (character < 0x10000) continue;
+            if (!find_child(character, "HumanoidRootPart")) continue;
 
             uintptr_t hrp = find_child(character, "HumanoidRootPart");
             uintptr_t humanoid = find_child(character, "Humanoid");
             if (!hrp) continue;
 
-            Vec3 pos = mem<Vec3>(hrp + off::CFrame);
+            Vec3 pos = get_part_position(hrp);
             if (pos.x == 0.0f && pos.y == 0.0f && pos.z == 0.0f) continue;
 
             float hp = 100.0f, max_hp = 100.0f;
             if (humanoid) {
                 hp = mem<float>(humanoid + off::Health);
-                max_hp = mem<float>(humanoid + off::Health + 4);
+                max_hp = mem<float>(humanoid + off::MaxHealth);
                 if (max_hp <= 0.0f) max_hp = 100.0f;
                 if (hp < 0.0f) hp = 0.0f;
             }
@@ -306,15 +351,10 @@ static void scanner_thread() {
 
             // Get local player pos for distance
             Vec3 local_pos{};
-            uintptr_t lchar = 0;
-            for (int co = off::Player_Character; co <= off::Player_Character + 0x40; co += 8) {
-                uintptr_t ch = mem<uintptr_t>(local_player + co);
-                if (ch < 0x10000) continue;
-                if (find_child(ch, "HumanoidRootPart")) { lchar = ch; break; }
-            }
-            if (lchar) {
+            uintptr_t lchar = mem<uintptr_t>(local_player + off::Player_Character);
+            if (lchar > 0x10000) {
                 uintptr_t lhrp = find_child(lchar, "HumanoidRootPart");
-                if (lhrp) local_pos = mem<Vec3>(lhrp + off::CFrame);
+                if (lhrp) local_pos = get_part_position(lhrp);
             }
 
             PlayerInfo pi;
