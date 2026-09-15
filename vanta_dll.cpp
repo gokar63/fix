@@ -555,6 +555,15 @@ static void create_render_target(IDXGISwapChain* sc) {
     }
 }
 
+static LRESULT CALLBACK hk_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (ImGui_ImplWin32_WndProcHandler(h, m, w, l)) return 1;
+    if (m == WM_KEYDOWN && w == VK_INSERT) g_menu_open = !g_menu_open.load();
+    if (m == WM_KEYDOWN && w == VK_END)    g_running = false;
+    if (g_menu_open && m >= WM_MOUSEFIRST && m <= WM_MOUSELAST) return 0;
+    if (g_menu_open && (m == WM_KEYDOWN || m == WM_KEYUP || m == WM_CHAR)) return 0;
+    return CallWindowProcA(g_orig_wndproc, h, m, w, l);
+}
+
 static HRESULT __stdcall hk_present(IDXGISwapChain* sc, UINT sync, UINT flags) {
     if (!g_imgui_init) {
         sc->GetDevice(__uuidof(ID3D11Device), (void**)&g_device);
@@ -578,14 +587,7 @@ static HRESULT __stdcall hk_present(IDXGISwapChain* sc, UINT sync, UINT flags) {
             create_render_target(sc);
 
             g_orig_wndproc = (WNDPROC)SetWindowLongPtrA(
-                g_game_hwnd, GWLP_WNDPROC, (LONG_PTR)[](HWND h, UINT m, WPARAM w, LPARAM l) -> LRESULT {
-                    if (ImGui_ImplWin32_WndProcHandler(h, m, w, l)) return 1;
-                    if (m == WM_KEYDOWN && w == VK_INSERT) g_menu_open = !g_menu_open.load();
-                    if (m == WM_KEYDOWN && w == VK_END)    g_running = false;
-                    if (g_menu_open && m >= WM_MOUSEFIRST && m <= WM_MOUSELAST) return 0;
-                    if (g_menu_open && (m == WM_KEYDOWN || m == WM_KEYUP || m == WM_CHAR)) return 0;
-                    return CallWindowProcA(g_orig_wndproc, h, m, w, l);
-                });
+                g_game_hwnd, GWLP_WNDPROC, (LONG_PTR)hk_wndproc);
 
             g_imgui_init = true;
         }

@@ -138,7 +138,7 @@ static DWORD WINAPI ShellcodeLoader(MapperData* d) {
 }
 static DWORD WINAPI ShellcodeLoaderEnd() { return 0; }
 #pragma runtime_checks("", restore)
-#pragma optimize("", restore)
+#pragma optimize("", on)
 
 // ================================================================
 // NtCreateThreadEx — less hooked than CreateRemoteThread
@@ -176,7 +176,7 @@ int main() {
     char exe_path[MAX_PATH];
     GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
     std::string dir(exe_path);
-    size_t sl = dir.find_last_of("\\/");
+    size_t sl = dir.find_last_of("\\\/");
     if (sl != std::string::npos) dir = dir.substr(0, sl + 1);
     std::string dll_path = dir + "vanta_dll.dll";
 
