@@ -35,7 +35,7 @@ namespace off {
     int ClassDescriptor = 0x18;
     int ClassName = 0x8;
 
-    int FDM_Pointer = 0x8DC2258;
+    int FDM_Pointer = 0x8E42C98;
     int FDM_DataModel = 0x1F8;
 
     int LocalPlayer = 0x130;
@@ -45,8 +45,8 @@ namespace off {
     int Camera_Rotation = 0xD8;
 
     int BasePart_Primitive = 0x188;
-    int Primitive_Position = 0xEC;
-    int Primitive_Rotation = 0xC8;
+    int Primitive_Position = 0xD4;
+    int Primitive_Rotation = 0xB0;
 
     int Health = 0x190;
     int MaxHealth = 0x1A8;
@@ -55,7 +55,7 @@ namespace off {
     int Player_Character = 0x298;
 
     int VE_ViewMatrix = 0x1B0;
-    int VE_Pointer = 0x83F0A08;
+    int VE_Pointer = 0x846F768;
 }
 
 static void load_offsets_config() {
