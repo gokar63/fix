@@ -49,3 +49,15 @@ target_link_libraries(vanta_hack PRIVATE
     psapi advapi32 ole32 oleaut32 uuid
     gdi32 dwmapi user32
 )
+
+# Offset Dumper — run first to generate offsets
+add_executable(offset_dumper offset_dumper.cpp)
+target_link_libraries(offset_dumper PRIVATE psapi advapi32)
+
+# VANTA DLL — internal hack (injected into Roblox)
+add_library(vanta_dll SHARED vanta_dll.cpp)
+target_link_libraries(vanta_dll PRIVATE user32 gdi32 psapi)
+
+# Injector — loads vanta_dll.dll into Roblox
+add_executable(injector injector.cpp)
+target_link_libraries(injector PRIVATE advapi32)
