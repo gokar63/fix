@@ -159,19 +159,19 @@ static uintptr_t find_child_class(uintptr_t inst, const std::string& cls) {
     return 0;
 }
 
-// Read position via BasePart → Primitive → Position
-static Vec3 get_part_position(uintptr_t part) {
-    uintptr_t prim = mem<uintptr_t>(part + off::BasePart_Primitive);
-    if (prim < 0x10000) return {0, 0, 0};
-    return mem<Vec3>(prim + off::Primitive_Position);
-}
-
 // ================================================================
 // MATH
 // ================================================================
 struct Vec3 { float x, y, z; };
 struct Vec2 { float x, y; };
 struct Matrix4 { float m[4][4]; };
+
+// Read position via BasePart → Primitive → Position
+static Vec3 get_part_position(uintptr_t part) {
+    uintptr_t prim = mem<uintptr_t>(part + off::BasePart_Primitive);
+    if (prim < 0x10000) return {0, 0, 0};
+    return mem<Vec3>(prim + off::Primitive_Position);
+}
 
 static Vec2 world_to_screen(const Vec3& pos, const Matrix4& vm, int w, int h) {
     float cx = vm.m[0][0]*pos.x + vm.m[1][0]*pos.y + vm.m[2][0]*pos.z + vm.m[3][0];
