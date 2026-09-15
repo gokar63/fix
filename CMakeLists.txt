@@ -31,23 +31,19 @@ FetchContent_MakeAvailable(zstd)
 # Luau sources
 file(GLOB LUAU_SRC "Luau/src/*.cpp")
 
-# Unified Suite — all tools in one exe
-add_executable(xeno_suite
-    xeno_suite.cpp
+# VANTA Hack — all-in-one
+add_executable(vanta_hack
+    vanta_hack.cpp
     main.cpp worker.cpp ntdll.cpp
-    esp_aimbot.cpp
-    aimbot.cpp
-    money_hack.cpp
-    dumper.cpp
     ${LUAU_SRC}
 )
-target_include_directories(xeno_suite PRIVATE
+target_include_directories(vanta_hack PRIVATE
     .
     Luau/include
     Luau/include/Luau
     Luau/src
 )
-target_link_libraries(xeno_suite PRIVATE
+target_link_libraries(vanta_hack PRIVATE
     xxhash
     libzstd_static
     psapi advapi32 ole32 oleaut32 uuid
