@@ -408,10 +408,11 @@ static HWND create_overlay() {
     EnumWindows(enum_roblox_windows, (LPARAM)&g_roblox_hwnd);
     if (g_roblox_hwnd) {
         RECT r; GetClientRect(g_roblox_hwnd, &r);
-        POINT pt = {0, 0}; ClientToScreen(g_roblox_hwnd, &pt);
         g_screen_w = r.right;
         g_screen_h = r.bottom;
         printf("[+] Found Roblox window: %dx%d\n", g_screen_w, g_screen_h);
+    } else {
+        printf("[!] Roblox window not found, using screen size\n");
     }
 
     WNDCLASSEXA wc{};
@@ -420,7 +421,9 @@ static HWND create_overlay() {
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "VantaOverlay";
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    RegisterClassExA(&wc);
+    if (!RegisterClassExA(&wc)) {
+        printf("[!] RegisterClassEx failed: %lu\n", GetLastError());
+    }
 
     HWND hwnd = CreateWindowExA(
         WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -438,22 +441,21 @@ static HWND create_overlay() {
     SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     UpdateWindow(hwnd);
-
     SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    printf("[+] Overlay window created\n");
+    printf("[+] Overlay window created: %p\n", (void*)hwnd);
     return hwnd;
 }
 
 static void update_overlay_position() {
     if (!g_roblox_hwnd || !g_hwnd) return;
-    if (!IsWindow(g_roblox_hwnd)) return;
+    if (!IsWindow(g_roblox_hwnd)) {
+        EnumWindows(enum_roblox_windows, (LPARAM)&g_roblox_hwnd);
+        if (!g_roblox_hwnd) return;
+    }
     RECT r; GetClientRect(g_roblox_hwnd, &r);
     POINT pt = {0, 0}; ClientToScreen(g_roblox_hwnd, &pt);
-    int w = r.right, h = r.bottom;
-    if (w != g_screen_w || h != g_screen_h) {
-        g_screen_w = w; g_screen_h = h;
-    }
-    SetWindowPos(g_hwnd, HWND_TOPMOST, pt.x, pt.y, w, h, SWP_NOACTIVATE);
+    g_screen_w = r.right; g_screen_h = r.bottom;
+    SetWindowPos(g_hwnd, HWND_TOPMOST, pt.x, pt.y, r.right, r.bottom, SWP_NOACTIVATE);
 }
 
 // ================================================================
@@ -501,12 +503,13 @@ static void draw_health_bar(HDC hdc, int x, int y, int h, float hp, float max_hp
 }
 
 static void render_frame() {
+    if (!g_hwnd) return;
     HDC hdc = GetDC(g_hwnd);
+    if (!hdc) return;
     HDC mem_dc = CreateCompatibleDC(hdc);
     HBITMAP bmp = CreateCompatibleBitmap(hdc, g_screen_w, g_screen_h);
     SelectObject(mem_dc, bmp);
 
-    // Clear to black (transparent via colorkey)
     RECT rc = { 0, 0, g_screen_w, g_screen_h };
     HBRUSH black = CreateSolidBrush(RGB(0, 0, 0));
     FillRect(mem_dc, &rc, black);
@@ -656,27 +659,41 @@ static void input_thread() {
 // ================================================================
 // MAIN THREAD
 // ================================================================
+static void log_to_file(const char* msg) {
+    FILE* lf = nullptr;
+    fopen_s(&lf, "C:\\vanta_log.txt", "a");
+    if (lf) { fprintf(lf, "%s\n", msg); fclose(lf); }
+}
+
 static DWORD WINAPI main_thread(LPVOID) {
+    log_to_file("=== VANTA DLL LOADED ===");
+
     AllocConsole();
     FILE* f;
     freopen_s(&f, "CONOUT$", "w", stdout);
 
     printf("\n  VANTA DLL — Internal Roblox Hack\n");
     printf("  [INSERT] Menu  |  [END] Eject\n\n");
+    log_to_file("Console allocated");
 
     load_offsets_config();
 
+    log_to_file("Creating overlay...");
     g_hwnd = create_overlay();
     if (!g_hwnd) {
         printf("[!] Failed to create overlay\n");
+        log_to_file("FAILED to create overlay");
+        MessageBoxA(nullptr, "VANTA: Overlay creation failed!", "VANTA", MB_OK);
         return 1;
     }
+    log_to_file("Overlay created OK");
 
     std::thread scanner(scanner_thread);
     std::thread input(input_thread);
 
     printf("[+] Scanner started\n");
     printf("[+] Overlay active — press INSERT for menu\n");
+    log_to_file("All threads started");
 
     MSG msg;
     while (g_running) {
@@ -711,6 +728,9 @@ static DWORD WINAPI main_thread(LPVOID) {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
+        FILE* lf = nullptr;
+        fopen_s(&lf, "C:\\vanta_log.txt", "a");
+        if (lf) { fprintf(lf, "DllMain: ATTACH pid=%lu\n", GetCurrentProcessId()); fclose(lf); }
         CreateThread(nullptr, 0, main_thread, hModule, 0, nullptr);
     }
     return TRUE;
