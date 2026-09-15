@@ -53,6 +53,9 @@ static std::vector<uint8_t> read_file(const std::string& path) {
 struct MapperData {
     uintptr_t imageBase;
     uintptr_t ntHeadersOffset;
+    uintptr_t originalRip;   // for thread hijack — resume here after loading
+    uintptr_t originalRcx;   // preserve original RCX
+    volatile LONG  done;     // set to 1 when shellcode finishes
 };
 
 #pragma optimize("", off)
@@ -91,7 +94,6 @@ static uintptr_t sc_find_module(DWORD name_hash) {
     for (auto* entry = head->Flink; entry != head; entry = entry->Flink) {
         auto* mod = CONTAINING_RECORD(entry, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks);
         if (mod->FullDllName.Buffer && mod->FullDllName.Length > 0) {
-            // extract just the filename from the full path
             wchar_t* name = mod->FullDllName.Buffer;
             wchar_t* last_slash = name;
             for (wchar_t* p = name; *p; p++)
@@ -149,7 +151,6 @@ static uintptr_t sc_find_module_by_name(const char* dll_name) {
         for (wchar_t* p = wname; *p; p++)
             if (*p == '\\' || *p == '/') last_slash = p + 1;
         if (last_slash > wname) wname = last_slash;
-        // case-insensitive compare wide vs ascii
         const char* a = dll_name;
         wchar_t* w = wname;
         bool match = true;
@@ -198,14 +199,15 @@ static uintptr_t sc_find_export_by_ordinal(uintptr_t mod_base, WORD ordinal) {
     return mod_base + funcs[idx];
 }
 
-static DWORD WINAPI ShellcodeLoader(MapperData* d) {
+// thread hijack shellcode — called with RCX = MapperData*
+// after loading, signals done and spins until injector restores context
+static void ShellcodeLoader(MapperData* d) {
     uintptr_t base = d->imageBase;
     auto* nt = (IMAGE_NT_HEADERS*)(base + d->ntHeadersOffset);
 
-    // resolve RtlAddFunctionTable from kernel32 or ntdll via hash
     uintptr_t kernel32 = sc_find_module(H_KERNEL32);
     uintptr_t ntdll_mod = sc_find_module(H_NTDLL);
-    if (!kernel32) return 0xDEAD0001;
+    if (!kernel32) { InterlockedExchange(&d->done, 0xDEAD0001); while(d->done != 0xFFFFFFFF){} return; }
 
     typedef BOOLEAN(WINAPI* RtlAddFunctionTable_t)(PRUNTIME_FUNCTION, DWORD, DWORD64);
     auto pRtlAddFunctionTable = (RtlAddFunctionTable_t)sc_find_export(kernel32, H_RTLADDFUNCTABLE);
@@ -234,7 +236,7 @@ static DWORD WINAPI ShellcodeLoader(MapperData* d) {
         }
     }
 
-    // imports — PURE PEB walk, zero calls to LoadLibraryA or GetProcAddress
+    // imports — PURE PEB walk, zero hooked API calls
     auto& impDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (impDir.Size) {
         auto* imp = (IMAGE_IMPORT_DESCRIPTOR*)(base + impDir.VirtualAddress);
@@ -256,7 +258,8 @@ static DWORD WINAPI ShellcodeLoader(MapperData* d) {
                     thk++; ot++;
                 }
             } else {
-                return 0xDEAD0003; // imported DLL not found in PEB
+                InterlockedExchange(&d->done, 0xDEAD0003);
+                while(d->done != 0xFFFFFFFF){} return;
             }
             imp++;
         }
@@ -286,31 +289,28 @@ static DWORD WINAPI ShellcodeLoader(MapperData* d) {
         ep((HINSTANCE)base, DLL_PROCESS_ATTACH, nullptr);
     }
 
-    return 0;
+    InterlockedExchange(&d->done, 1);
+    // spin until injector restores our context
+    while (d->done != 0xFFFFFFFF) { }
 }
-static DWORD WINAPI ShellcodeLoaderEnd() { return 0; }
+static void ShellcodeLoaderEnd() { }
 #pragma runtime_checks("", restore)
 #pragma optimize("", on)
 
 // ================================================================
-// NtCreateThreadEx — less hooked than CreateRemoteThread
+// Thread hijack — find a thread, suspend, redirect RIP, resume
+// Bypasses NtCreateThreadEx code integrity check entirely
 // ================================================================
-typedef NTSTATUS(NTAPI* NtCreateThreadEx_t)(
-    PHANDLE, ACCESS_MASK, PVOID, HANDLE, PVOID, PVOID,
-    ULONG, SIZE_T, SIZE_T, SIZE_T, PVOID);
-
-static HANDLE create_remote_thread(HANDLE proc, LPVOID start, LPVOID param) {
-    auto ntdll_mod = GetModuleHandleA("ntdll.dll");
-    auto fn = (NtCreateThreadEx_t)GetProcAddress(ntdll_mod, "NtCreateThreadEx");
-    if (fn) {
-        HANDLE thread = nullptr;
-        NTSTATUS st = fn(&thread, THREAD_ALL_ACCESS, nullptr, proc,
-            start, param, 0, 0, 0x1000, 0x10000, nullptr);
-        if (st == 0 && thread) return thread;
-        printf("[!] NtCreateThreadEx: 0x%08lX, falling back\n", (unsigned long)st);
-    }
-    return CreateRemoteThread(proc, nullptr, 0,
-        (LPTHREAD_START_ROUTINE)start, param, 0, nullptr);
+static DWORD find_thread(DWORD pid) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    THREADENTRY32 te{}; te.dwSize = sizeof(te);
+    DWORD tid = 0;
+    if (Thread32First(snap, &te)) do {
+        if (te.th32OwnerProcessID == pid) { tid = te.th32ThreadID; break; }
+    } while (Thread32Next(snap, &te));
+    CloseHandle(snap);
+    return tid;
 }
 
 // ================================================================
@@ -318,10 +318,10 @@ static HANDLE create_remote_thread(HANDLE proc, LPVOID start, LPVOID param) {
 // ================================================================
 int main() {
     printf("\n");
-    printf("  +================================+\n");
-    printf("  |  VANTA Manual Map Injector      |\n");
-    printf("  |  PEB-walk shellcode (no hooks)  |\n");
-    printf("  +================================+\n\n");
+    printf("  +====================================+\n");
+    printf("  |  VANTA Manual Map Injector          |\n");
+    printf("  |  Thread hijack + PEB-walk (v3)      |\n");
+    printf("  +====================================+\n\n");
 
     enable_debug();
 
@@ -376,6 +376,7 @@ int main() {
         system("pause"); return 1;
     }
 
+    // map PE sections
     SIZE_T img_size = nt->OptionalHeader.SizeOfImage;
     LPVOID remote_base = VirtualAllocEx(proc, nullptr, img_size,
         MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -398,16 +399,12 @@ int main() {
     }
     printf("[+] PE sections written\n");
 
-    // mapper data — only imageBase and ntHeadersOffset needed now
-    MapperData md{};
-    md.imageBase = (uintptr_t)remote_base;
-    md.ntHeadersOffset = (uintptr_t)dos->e_lfanew;
-
     // shellcode size
     size_t sc_size = (BYTE*)ShellcodeLoaderEnd - (BYTE*)ShellcodeLoader;
     if (sc_size == 0 || sc_size > 0x10000) sc_size = 0x4000;
     printf("[+] Shellcode size: %zu bytes\n", sc_size);
 
+    // allocate shellcode + data region
     size_t alloc_size = sc_size + sizeof(MapperData) + 64;
     LPVOID remote_sc = VirtualAllocEx(proc, nullptr, alloc_size,
         MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -420,34 +417,109 @@ int main() {
     LPVOID remote_data = remote_sc;
     LPVOID remote_code = (BYTE*)remote_sc + sizeof(MapperData) + 16;
 
-    WriteProcessMemory(proc, remote_data, &md, sizeof(md), nullptr);
-    WriteProcessMemory(proc, remote_code, (void*)ShellcodeLoader, sc_size, nullptr);
-    printf("[+] Shellcode written at %p (%zu bytes)\n", remote_code, sc_size);
+    // find a thread to hijack
+    DWORD tid = find_thread(pid);
+    if (!tid) {
+        printf("[!] No threads found in target\n");
+        VirtualFreeEx(proc, remote_base, 0, MEM_RELEASE);
+        VirtualFreeEx(proc, remote_sc, 0, MEM_RELEASE);
+        CloseHandle(proc); system("pause"); return 1;
+    }
+    printf("[+] Target thread: %lu\n", tid);
 
-    HANDLE thread = create_remote_thread(proc, remote_code, remote_data);
-    if (!thread) {
-        printf("[!] Thread creation failed (%lu)\n", GetLastError());
+    HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, tid);
+    if (!hThread) {
+        printf("[!] OpenThread failed (%lu)\n", GetLastError());
         VirtualFreeEx(proc, remote_base, 0, MEM_RELEASE);
         VirtualFreeEx(proc, remote_sc, 0, MEM_RELEASE);
         CloseHandle(proc); system("pause"); return 1;
     }
 
-    printf("[+] Loader thread started, waiting...\n");
-    DWORD wait = WaitForSingleObject(thread, 30000);
-    if (wait == WAIT_TIMEOUT) {
-        printf("[!] Loader timed out — DLL may still be initializing\n");
-    } else {
-        DWORD exit_code = 0;
-        GetExitCodeThread(thread, &exit_code);
-        if (exit_code == 0)
-            printf("[+] Manual map successful!\n");
-        else
-            printf("[!] Loader returned 0x%lX\n", exit_code);
+    // suspend thread and grab context
+    SuspendThread(hThread);
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_FULL;
+    if (!GetThreadContext(hThread, &ctx)) {
+        printf("[!] GetThreadContext failed (%lu)\n", GetLastError());
+        ResumeThread(hThread);
+        CloseHandle(hThread);
+        VirtualFreeEx(proc, remote_base, 0, MEM_RELEASE);
+        VirtualFreeEx(proc, remote_sc, 0, MEM_RELEASE);
+        CloseHandle(proc); system("pause"); return 1;
     }
+    printf("[+] Thread suspended, RIP = 0x%llX\n", (unsigned long long)ctx.Rip);
+
+    // write mapper data with original context info
+    MapperData md{};
+    md.imageBase = (uintptr_t)remote_base;
+    md.ntHeadersOffset = (uintptr_t)dos->e_lfanew;
+    md.originalRip = ctx.Rip;
+    md.originalRcx = ctx.Rcx;
+    md.done = 0;
+
+    WriteProcessMemory(proc, remote_data, &md, sizeof(md), nullptr);
+    WriteProcessMemory(proc, remote_code, (void*)ShellcodeLoader, sc_size, nullptr);
+    printf("[+] Shellcode written at %p\n", remote_code);
+
+    // hijack: set RCX = data pointer, RIP = shellcode
+    ctx.Rcx = (DWORD64)remote_data;
+    ctx.Rip = (DWORD64)remote_code;
+    if (!SetThreadContext(hThread, &ctx)) {
+        printf("[!] SetThreadContext failed (%lu)\n", GetLastError());
+        ctx.Rip = md.originalRip;
+        ctx.Rcx = md.originalRcx;
+        SetThreadContext(hThread, &ctx);
+        ResumeThread(hThread);
+        CloseHandle(hThread);
+        VirtualFreeEx(proc, remote_base, 0, MEM_RELEASE);
+        VirtualFreeEx(proc, remote_sc, 0, MEM_RELEASE);
+        CloseHandle(proc); system("pause"); return 1;
+    }
+
+    // resume and poll for completion
+    ResumeThread(hThread);
+    printf("[+] Thread resumed with hijacked RIP, waiting...\n");
+
+    LONG result = 0;
+    for (int i = 0; i < 300; i++) {
+        Sleep(100);
+        MapperData check{};
+        SIZE_T rd2 = 0;
+        ReadProcessMemory(proc, remote_data, &check, sizeof(check), &rd2);
+        if (check.done != 0) {
+            result = check.done;
+            break;
+        }
+        if (i == 299) {
+            printf("[!] Timed out waiting for shellcode (30s)\n");
+            result = -1;
+        }
+    }
+
+    // restore original thread context — shellcode is spinning waiting for this
+    SuspendThread(hThread);
+    CONTEXT restore_ctx{};
+    restore_ctx.ContextFlags = CONTEXT_FULL;
+    GetThreadContext(hThread, &restore_ctx);
+    restore_ctx.Rip = md.originalRip;
+    restore_ctx.Rcx = md.originalRcx;
+    SetThreadContext(hThread, &restore_ctx);
+    LONG release = 0xFFFFFFFF;
+    WriteProcessMemory(proc, (BYTE*)remote_data + offsetof(MapperData, done),
+        &release, sizeof(release), nullptr);
+    ResumeThread(hThread);
+    printf("[+] Thread context restored\n");
+
+    if (result == 1)
+        printf("[+] Manual map successful!\n");
+    else if (result == -1)
+        printf("[!] Shellcode did not signal completion\n");
+    else
+        printf("[!] Shellcode error: 0x%lX\n", (unsigned long)result);
 
     printf("[+] Press INSERT in-game for the menu.\n");
 
-    CloseHandle(thread);
+    CloseHandle(hThread);
     CloseHandle(proc);
 
     printf("\n");
