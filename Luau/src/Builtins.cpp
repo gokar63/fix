@@ -4,6 +4,9 @@
 #include "Luau/Bytecode.h"
 #include "Luau/Compiler.h"
 
+LUAU_FASTFLAGVARIABLE(LuauCompileBuiltinTonumber, false)
+LUAU_FASTFLAGVARIABLE(LuauCompileBuiltinTostring, false)
+
 namespace Luau
 {
 namespace Compile
@@ -69,9 +72,9 @@ static int getBuiltinFunctionId(const Builtin& builtin, const CompileOptions& op
     if (builtin.isGlobal("setmetatable"))
         return LBF_SETMETATABLE;
 
-    if (builtin.isGlobal("tonumber"))
+    if (FFlag::LuauCompileBuiltinTonumber && builtin.isGlobal("tonumber"))
         return LBF_TONUMBER;
-    if (builtin.isGlobal("tostring"))
+    if (FFlag::LuauCompileBuiltinTostring && builtin.isGlobal("tostring"))
         return LBF_TOSTRING;
 
     if (builtin.object == "math")

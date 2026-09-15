@@ -3,7 +3,6 @@
 
 #include "Luau/StringUtils.h"
 
-#include <algorithm>
 #include <mutex>
 #include <string>
 
@@ -16,7 +15,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <windows.h>
+#include <Windows.h>
 #endif
 
 #ifdef __APPLE__
@@ -26,7 +25,7 @@
 
 #include <time.h>
 
-LUAU_FASTFLAGVARIABLE(DebugLuauTimeTracing)
+LUAU_FASTFLAGVARIABLE(DebugLuauTimeTracing, false)
 namespace Luau
 {
 namespace TimeTrace
@@ -41,7 +40,7 @@ static double getClockPeriod()
     mach_timebase_info_data_t result = {};
     mach_timebase_info(&result);
     return double(result.numer) / double(result.denom) * 1e-9;
-#elif defined(__linux__) || defined(__FreeBSD__)
+#elif defined(__linux__)
     return 1e-9;
 #else
     return 1.0 / double(CLOCKS_PER_SEC);
@@ -56,7 +55,7 @@ static double getClockTimestamp()
     return double(result.QuadPart);
 #elif defined(__APPLE__)
     return double(mach_absolute_time());
-#elif defined(__linux__) || defined(__FreeBSD__)
+#elif defined(__linux__)
     timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     return now.tv_sec * 1e9 + now.tv_nsec;
@@ -185,14 +184,8 @@ void flushEvents(GlobalContext& context, uint32_t threadId, const std::vector<Ev
 
             Token& token = context.tokens[ev.token];
 
-            formatAppend(
-                temp,
-                R"({"name": "%s", "cat": "%s", "ph": "B", "ts": %u, "pid": 0, "tid": %u)",
-                token.name,
-                token.category,
-                ev.data.microsec,
-                threadId
-            );
+            formatAppend(temp, R"({"name": "%s", "cat": "%s", "ph": "B", "ts": %u, "pid": 0, "tid": %u)", token.name, token.category,
+                ev.data.microsec, threadId);
             unfinishedEnter = true;
         }
         break;
@@ -208,13 +201,10 @@ void flushEvents(GlobalContext& context, uint32_t threadId, const std::vector<Ev
                 unfinishedEnter = false;
             }
 
-            formatAppend(
-                temp,
+            formatAppend(temp,
                 R"({"ph": "E", "ts": %u, "pid": 0, "tid": %u},)"
                 "\n",
-                ev.data.microsec,
-                threadId
-            );
+                ev.data.microsec, threadId);
             break;
         case EventType::ArgName:
             LUAU_ASSERT(unfinishedEnter);
@@ -260,10 +250,6 @@ void flushEvents(GlobalContext& context, uint32_t threadId, const std::vector<Ev
 
 ThreadContext& getThreadContext()
 {
-    // Check custom provider that which might implement a custom TLS
-    if (auto provider = threadContextProvider())
-        return provider();
-
     thread_local ThreadContext context;
     return context;
 }

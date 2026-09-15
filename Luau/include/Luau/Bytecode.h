@@ -44,7 +44,7 @@
 // Version 1: Baseline version for the open-source release. Supported until 0.521.
 // Version 2: Adds Proto::linedefined. Supported until 0.544.
 // Version 3: Adds FORGPREP/JUMPXEQK* and enhances AUX encoding for FORGLOOP. Removes FORGLOOP_NEXT/INEXT and JUMPIFEQK/JUMPIFNOTEQK. Currently supported.
-// Version 4: Adds Proto::flags, typeinfo, and floor division opcodes IDIV/IDIVK. Currently supported.
+// Version 4: Adds Proto::flags and typeinfo. Currently supported.
 
 // Bytecode opcode, part of the instruction header
 enum LuauOpcode
@@ -390,18 +390,6 @@ enum LuauOpcode
     LOP_JUMPXEQKN,
     LOP_JUMPXEQKS,
 
-    // IDIV: compute floor division between two source registers and put the result into target register
-    // A: target register
-    // B: source register 1
-    // C: source register 2
-    LOP_IDIV,
-
-    // IDIVK compute floor division between the source register and a constant and put the result into target register
-    // A: target register
-    // B: source register
-    // C: constant table index (0..255)
-    LOP_IDIVK,
-
     // Enum entry for number of opcodes, not a valid opcode by itself!
     LOP__COUNT
 };
@@ -427,7 +415,7 @@ enum LuauBytecodeTag
     // Bytecode version; runtime supports [MIN, MAX], compiler emits TARGET by default but may emit a higher version when flags are enabled
     LBC_VERSION_MIN = 3,
     LBC_VERSION_MAX = 4,
-    LBC_VERSION_TARGET = 4,
+    LBC_VERSION_TARGET = 3,
     // Type encoding version
     LBC_TYPE_VERSION = 1,
     // Types of constant table entries
@@ -575,6 +563,4 @@ enum LuauProtoFlag
 {
     // used to tag main proto for modules with --!native
     LPF_NATIVE_MODULE = 1 << 0,
-    // used to tag individual protos as not profitable to compile natively
-    LPF_NATIVE_COLD = 1 << 1,
 };

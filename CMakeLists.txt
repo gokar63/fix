@@ -3,6 +3,7 @@ project(Xeno LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+add_definitions(-DNOMINMAX)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
 include(FetchContent)
@@ -47,7 +48,6 @@ target_link_libraries(xeno PRIVATE
 # ESP + Aimbot
 add_executable(esp_aimbot esp_aimbot.cpp)
 target_link_libraries(esp_aimbot PRIVATE gdi32 dwmapi psapi advapi32 user32)
-set_target_properties(esp_aimbot PROPERTIES WIN32_EXECUTABLE TRUE)
 
 # Aimbot
 add_executable(aimbot aimbot.cpp)
