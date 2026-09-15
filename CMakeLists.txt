@@ -32,7 +32,12 @@ file(GLOB LUAU_SRC "Luau/src/*.cpp")
 
 # Xeno Executor
 add_executable(xeno main.cpp worker.cpp ntdll.cpp ${LUAU_SRC})
-target_include_directories(xeno PRIVATE . Luau/include Luau/src)
+target_include_directories(xeno PRIVATE
+    .
+    Luau/include
+    Luau/include/Luau
+    Luau/src
+)
 target_link_libraries(xeno PRIVATE
     xxhash
     libzstd_static

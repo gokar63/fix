@@ -5,13 +5,10 @@
 
 namespace Luau
 {
-
-class AstNameTable;
-
 namespace Compile
 {
 
-Constant foldBuiltin(AstNameTable& stringTable, int bfid, const Constant* args, size_t count, bool vectorDoublePrecision);
+Constant foldBuiltin(int bfid, const Constant* args, size_t count);
 Constant foldBuiltinMath(AstName index);
 
 } // namespace Compile

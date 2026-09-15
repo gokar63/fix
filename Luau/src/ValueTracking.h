@@ -4,8 +4,6 @@
 #include "Luau/Ast.h"
 #include "Luau/DenseHash.h"
 
-#include <vector>
-
 namespace Luau
 {
 class AstNameTable;
@@ -31,20 +29,7 @@ struct Variable
 };
 
 void assignMutable(DenseHashMap<AstName, Global>& globals, const AstNameTable& names, const char* const* mutableGlobals);
-void trackValues(
-    DenseHashMap<AstName, Global>& globals,
-    DenseHashMap<AstLocal*, Variable>& variables,
-    DenseHashMap<AstName, AstLocal*>& classLocals,
-    DenseHashSet<AstLocal*>& exportedFunctions,
-    std::vector<AstLocal*>& exportedVariables,
-    AstNode* root
-);
-void trackValues_DEPRECATED(
-    DenseHashMap<AstName, Global>& globals,
-    DenseHashMap<AstLocal*, Variable>& variables,
-    DenseHashMap<AstName, AstLocal*>& classLocals,
-    AstNode* root
-);
+void trackValues(DenseHashMap<AstName, Global>& globals, DenseHashMap<AstLocal*, Variable>& variables, AstNode* root);
 
 inline Global getGlobalState(const DenseHashMap<AstName, Global>& globals, AstName name)
 {

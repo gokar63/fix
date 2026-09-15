@@ -130,8 +130,10 @@ public:
         , queue_size(other.queue_size)
     {
         // copy the initialized contents of the other buffer to this one
-        size_t head_size = std::min(other.queue_size,
-            other.buffer_capacity - other.head);         // how many elements are in the head portion (i.e. from the head to the end of the buffer)
+        size_t head_size = std::min(
+            other.queue_size,
+            other.buffer_capacity - other.head
+        );                                               // how many elements are in the head portion (i.e. from the head to the end of the buffer)
         size_t tail_size = other.queue_size - head_size; // how many elements are in the tail portion (i.e. any portion that wrapped to the front)
 
         if (head_size != 0)
@@ -149,8 +151,10 @@ public:
         , queue_size(other.queue_size)
     {
         // copy the initialized contents of the other buffer to this one
-        size_t head_size = std::min(other.queue_size,
-            other.buffer_capacity - other.head);         // how many elements are in the head portion (i.e. from the head to the end of the buffer)
+        size_t head_size = std::min(
+            other.queue_size,
+            other.buffer_capacity - other.head
+        );                                               // how many elements are in the head portion (i.e. from the head to the end of the buffer)
         size_t tail_size = other.queue_size - head_size; // how many elements are in the tail portion (i.e. any portion that wrapped to the front)
 
         if (head_size != 0)
@@ -212,8 +216,10 @@ public:
             buffer_capacity = other.buffer_capacity;
         }
 
-        size_t head_size = std::min(other.queue_size,
-            other.buffer_capacity - other.head);         // how many elements are in the head portion (i.e. from the head to the end of the buffer)
+        size_t head_size = std::min(
+            other.queue_size,
+            other.buffer_capacity - other.head
+        );                                               // how many elements are in the head portion (i.e. from the head to the end of the buffer)
         size_t tail_size = other.queue_size - head_size; // how many elements are in the tail portion (i.e. any portion that wrapped to the front)
 
         // Assignment doesn't try to match the capacity of 'other' and thus makes the buffer contiguous
@@ -435,6 +441,19 @@ public:
         queue_size++;
     }
 
+    template<typename... Args>
+    T& emplace_back(Args&&... args)
+    {
+        if (is_full())
+            grow();
+
+        size_t next_back = logicalToPhysical(queue_size);
+        new (buffer + next_back) T(std::forward<Args>(args)...);
+        queue_size++;
+        return buffer[next_back];
+    }
+
+
     void pop_back()
     {
         LUAU_ASSERT(!empty());
@@ -452,6 +471,18 @@ public:
         head = (head == 0) ? capacity() - 1 : head - 1;
         new (buffer + head) T(value);
         queue_size++;
+    }
+
+    template<typename... Args>
+    T& emplace_front(Args&&... args)
+    {
+        if (is_full())
+            grow();
+
+        head = (head == 0) ? capacity() - 1 : head - 1;
+        new (buffer + head) T(std::forward<Args>(args)...);
+        queue_size++;
+        return buffer[head];
     }
 
     void pop_front()

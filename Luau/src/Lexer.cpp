@@ -7,7 +7,9 @@
 
 #include <limits.h>
 
+LUAU_FASTFLAGVARIABLE(LuauFloorDivision, false)
 LUAU_FASTFLAGVARIABLE(LuauLexerLookaheadRemembersBraceType, false)
+LUAU_FASTFLAGVARIABLE(LuauCheckedFunctionSyntax, false)
 
 namespace Luau
 {
@@ -102,19 +104,11 @@ Lexeme::Lexeme(const Location& location, Type type, const char* name)
     , length(0)
     , name(name)
 {
-    LUAU_ASSERT(type == Name || type == Attribute || (type >= Reserved_BEGIN && type < Lexeme::Reserved_END));
-}
-
-unsigned int Lexeme::getLength() const
-{
-    LUAU_ASSERT(type == RawString || type == QuotedString || type == InterpStringBegin || type == InterpStringMid || type == InterpStringEnd ||
-                type == InterpStringSimple || type == BrokenInterpDoubleBrace || type == Number || type == Comment || type == BlockComment);
-
-    return length;
+    LUAU_ASSERT(type == Name || (type >= Reserved_BEGIN && type < Lexeme::Reserved_END));
 }
 
 static const char* kReserved[] = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local", "nil", "not", "or",
-    "repeat", "return", "then", "true", "until", "while"};
+    "repeat", "return", "then", "true", "until", "while", "@checked"};
 
 std::string Lexeme::toString() const
 {
@@ -148,7 +142,7 @@ std::string Lexeme::toString() const
         return "'::'";
 
     case FloorDiv:
-        return "'//'";
+        return FFlag::LuauFloorDivision ? "'//'" : "<unknown>";
 
     case AddAssign:
         return "'+='";
@@ -163,7 +157,7 @@ std::string Lexeme::toString() const
         return "'/='";
 
     case FloorDivAssign:
-        return "'//='";
+        return FFlag::LuauFloorDivision ? "'//='" : "<unknown>";
 
     case ModAssign:
         return "'%='";
@@ -198,9 +192,6 @@ std::string Lexeme::toString() const
 
     case Comment:
         return "comment";
-
-    case Attribute:
-        return name ? format("'%s'", name) : "attribute";
 
     case BrokenString:
         return "malformed string";
@@ -289,7 +280,7 @@ std::pair<AstName, Lexeme::Type> AstNameTable::getOrAddWithType(const char* name
     nameData[length] = 0;
 
     const_cast<Entry&>(entry).value = AstName(nameData);
-    const_cast<Entry&>(entry).type = (name[0] == '@' ? Lexeme::Attribute : Lexeme::Name);
+    const_cast<Entry&>(entry).type = Lexeme::Name;
 
     return std::make_pair(entry.value, entry.type);
 }
@@ -918,29 +909,44 @@ Lexeme Lexer::readNext()
 
     case '/':
     {
-        consume();
-
-        char ch = peekch();
-
-        if (ch == '=')
+        if (FFlag::LuauFloorDivision)
         {
             consume();
-            return Lexeme(Location(start, 2), Lexeme::DivAssign);
+
+            char ch = peekch();
+
+            if (ch == '=')
+            {
+                consume();
+                return Lexeme(Location(start, 2), Lexeme::DivAssign);
+            }
+            else if (ch == '/')
+            {
+                consume();
+
+                if (peekch() == '=')
+                {
+                    consume();
+                    return Lexeme(Location(start, 3), Lexeme::FloorDivAssign);
+                }
+                else
+                    return Lexeme(Location(start, 2), Lexeme::FloorDiv);
+            }
+            else
+                return Lexeme(Location(start, 1), '/');
         }
-        else if (ch == '/')
+        else
         {
             consume();
 
             if (peekch() == '=')
             {
                 consume();
-                return Lexeme(Location(start, 3), Lexeme::FloorDivAssign);
+                return Lexeme(Location(start, 2), Lexeme::DivAssign);
             }
             else
-                return Lexeme(Location(start, 2), Lexeme::FloorDiv);
+                return Lexeme(Location(start, 1), '/');
         }
-        else
-            return Lexeme(Location(start, 1), '/');
     }
 
     case '*':
@@ -1005,8 +1011,17 @@ Lexeme Lexer::readNext()
     }
     case '@':
     {
-        std::pair<AstName, Lexeme::Type> attribute = readName();
-        return Lexeme(Location(start, position()), Lexeme::Attribute, attribute.first.value);
+        if (FFlag::LuauCheckedFunctionSyntax)
+        {
+            // We're trying to lex the token @checked
+            LUAU_ASSERT(peekch() == '@');
+
+            std::pair<AstName, Lexeme::Type> maybeChecked = readName();
+            if (maybeChecked.second != Lexeme::ReservedChecked)
+                return Lexeme(Location(start, position()), Lexeme::Error);
+
+            return Lexeme(Location(start, position()), maybeChecked.second, maybeChecked.first.value);
+        }
     }
     default:
         if (isDigit(peekch()))

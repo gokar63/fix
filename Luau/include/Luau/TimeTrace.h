@@ -134,14 +134,6 @@ struct ThreadContext
     static constexpr size_t kEventFlushLimit = 8192;
 };
 
-using ThreadContextProvider = ThreadContext& (*)();
-
-inline ThreadContextProvider& threadContextProvider()
-{
-    static ThreadContextProvider handler = nullptr;
-    return handler;
-}
-
 ThreadContext& getThreadContext();
 
 struct Scope

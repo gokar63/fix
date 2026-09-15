@@ -1,6 +1,7 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
+#include <string>
 namespace Luau
 {
 
@@ -8,11 +9,7 @@ struct Position
 {
     unsigned int line, column;
 
-    Position(unsigned int line, unsigned int column)
-        : line(line)
-        , column(column)
-    {
-    }
+    Position(unsigned int line, unsigned int column);
 
     bool operator==(const Position& rhs) const;
     bool operator!=(const Position& rhs) const;
@@ -28,29 +25,10 @@ struct Location
 {
     Position begin, end;
 
-    Location()
-        : begin(0, 0)
-        , end(0, 0)
-    {
-    }
-
-    Location(const Position& begin, const Position& end)
-        : begin(begin)
-        , end(end)
-    {
-    }
-
-    Location(const Position& begin, unsigned int length)
-        : begin(begin)
-        , end(begin.line, begin.column + length)
-    {
-    }
-
-    Location(const Location& begin, const Location& end)
-        : begin(begin.begin)
-        , end(end.end)
-    {
-    }
+    Location();
+    Location(const Position& begin, const Position& end);
+    Location(const Position& begin, unsigned int length);
+    Location(const Location& begin, const Location& end);
 
     bool operator==(const Location& rhs) const;
     bool operator!=(const Location& rhs) const;

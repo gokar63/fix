@@ -141,7 +141,8 @@ size_t editDistance(std::string_view a, std::string_view b)
     size_t maxDistance = a.size() + b.size();
 
     std::vector<size_t> distances((a.size() + 2) * (b.size() + 2), 0);
-    auto getPos = [b](size_t x, size_t y) -> size_t {
+    auto getPos = [b](size_t x, size_t y) -> size_t
+    {
         return (x * (b.size() + 2)) + y;
     };
 
@@ -294,4 +295,21 @@ std::string escape(std::string_view s, bool escapeForInterpString)
 
     return r;
 }
+
+static bool isWhitespace(char c)
+{
+    return c == ' ' || c == '\n' || c == '\r' || c == '\t';
+}
+
+std::string_view strip(std::string_view s)
+{
+    while (!s.empty() && isWhitespace(s.front()))
+        s.remove_prefix(1);
+
+    while (!s.empty() && isWhitespace(s.back()))
+        s.remove_suffix(1);
+
+    return s;
+}
+
 } // namespace Luau
