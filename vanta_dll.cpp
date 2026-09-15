@@ -384,9 +384,35 @@ static LRESULT CALLBACK overlay_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
+static HWND g_roblox_hwnd = nullptr;
+
+static BOOL CALLBACK enum_roblox_windows(HWND hwnd, LPARAM lp) {
+    DWORD pid; GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == GetCurrentProcessId() && IsWindowVisible(hwnd)) {
+        char cls[64]; GetClassNameA(hwnd, cls, 64);
+        if (strstr(cls, "Roblox") || strstr(cls, "Win32")) {
+            RECT r; GetClientRect(hwnd, &r);
+            if (r.right > 100 && r.bottom > 100) {
+                *(HWND*)lp = hwnd;
+                return FALSE;
+            }
+        }
+    }
+    return TRUE;
+}
+
 static HWND create_overlay() {
     g_screen_w = GetSystemMetrics(SM_CXSCREEN);
     g_screen_h = GetSystemMetrics(SM_CYSCREEN);
+
+    EnumWindows(enum_roblox_windows, (LPARAM)&g_roblox_hwnd);
+    if (g_roblox_hwnd) {
+        RECT r; GetClientRect(g_roblox_hwnd, &r);
+        POINT pt = {0, 0}; ClientToScreen(g_roblox_hwnd, &pt);
+        g_screen_w = r.right;
+        g_screen_h = r.bottom;
+        printf("[+] Found Roblox window: %dx%d\n", g_screen_w, g_screen_h);
+    }
 
     WNDCLASSEXA wc{};
     wc.cbSize = sizeof(wc);
@@ -397,17 +423,37 @@ static HWND create_overlay() {
     RegisterClassExA(&wc);
 
     HWND hwnd = CreateWindowExA(
-        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         "VantaOverlay", "",
         WS_POPUP,
         0, 0, g_screen_w, g_screen_h,
         nullptr, nullptr, wc.hInstance, nullptr
     );
 
+    if (!hwnd) {
+        printf("[!] CreateWindowEx failed: %lu\n", GetLastError());
+        return nullptr;
+    }
+
     SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
-    ShowWindow(hwnd, SW_SHOW);
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     UpdateWindow(hwnd);
+
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    printf("[+] Overlay window created\n");
     return hwnd;
+}
+
+static void update_overlay_position() {
+    if (!g_roblox_hwnd || !g_hwnd) return;
+    if (!IsWindow(g_roblox_hwnd)) return;
+    RECT r; GetClientRect(g_roblox_hwnd, &r);
+    POINT pt = {0, 0}; ClientToScreen(g_roblox_hwnd, &pt);
+    int w = r.right, h = r.bottom;
+    if (w != g_screen_w || h != g_screen_h) {
+        g_screen_w = w; g_screen_h = h;
+    }
+    SetWindowPos(g_hwnd, HWND_TOPMOST, pt.x, pt.y, w, h, SWP_NOACTIVATE);
 }
 
 // ================================================================
@@ -639,6 +685,7 @@ static DWORD WINAPI main_thread(LPVOID) {
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
         }
+        update_overlay_position();
         render_frame();
         aimbot_tick();
         Sleep(8); // ~120fps render
