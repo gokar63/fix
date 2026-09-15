@@ -83,15 +83,25 @@ static T mem(uintptr_t addr) {
     __except (EXCEPTION_EXECUTE_HANDLER) { return T{}; }
 }
 
-static std::string read_rstr(uintptr_t addr) {
-    if (addr < 0x10000) return "";
+// SEH helper — no C++ objects, so __try is allowed
+static bool read_rstr_raw(uintptr_t addr, char* out, size_t* out_len) {
     __try {
         uint64_t len = *(uint64_t*)(addr + 0x10);
-        if (len == 0 || len > 200) return "";
+        if (len == 0 || len > 200) return false;
         const char* buf = (len > 15) ? (const char*)*(uintptr_t*)addr : (const char*)addr;
-        if ((uintptr_t)buf < 0x10000) return "";
-        return std::string(buf, (size_t)len);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return ""; }
+        if ((uintptr_t)buf < 0x10000) return false;
+        size_t copy = (len < 200) ? (size_t)len : 200;
+        for (size_t i = 0; i < copy; i++) out[i] = buf[i];
+        *out_len = copy;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static std::string read_rstr(uintptr_t addr) {
+    if (addr < 0x10000) return "";
+    char buf[201]; size_t len = 0;
+    if (read_rstr_raw(addr, buf, &len)) return std::string(buf, len);
+    return "";
 }
 
 static std::string inst_name(uintptr_t inst) {
@@ -204,22 +214,19 @@ static uintptr_t find_datamodel() {
             uintptr_t start = base + sec[i].VirtualAddress;
             uintptr_t size = sec[i].Misc.VirtualSize;
             for (uintptr_t a = start; a + 8 < start + size; a += 8) {
-                __try {
-                    uintptr_t fdm = *(uintptr_t*)a;
-                    if (fdm < 0x10000 || fdm > 0x7FFFFFFFFFFF) continue;
-                    uintptr_t dm = *(uintptr_t*)(fdm + off::FDM_DataModel);
-                    if (dm < 0x10000) continue;
-                    // Check children for known services
-                    auto ch = get_children(dm);
-                    int known = 0;
-                    for (auto c : ch) {
-                        std::string n = inst_name(c);
-                        if (n == "Workspace" || n == "Players" || n == "Lighting" ||
-                            n == "ReplicatedStorage" || n == "StarterGui")
-                            known++;
-                    }
-                    if (known >= 3) return dm;
-                } __except (EXCEPTION_EXECUTE_HANDLER) { continue; }
+                uintptr_t fdm = mem<uintptr_t>(a);
+                if (fdm < 0x10000 || fdm > 0x7FFFFFFFFFFF) continue;
+                uintptr_t dm = mem<uintptr_t>(fdm + off::FDM_DataModel);
+                if (dm < 0x10000) continue;
+                auto ch = get_children(dm);
+                int known = 0;
+                for (auto c : ch) {
+                    std::string n = inst_name(c);
+                    if (n == "Workspace" || n == "Players" || n == "Lighting" ||
+                        n == "ReplicatedStorage" || n == "StarterGui")
+                        known++;
+                }
+                if (known >= 3) return dm;
             }
         }
     }
@@ -238,12 +245,12 @@ static void scanner_thread() {
         }
 
         // Verify DataModel still valid
-        __try {
+        {
             auto ch = get_children(dm);
             bool has_players = false;
             for (auto c : ch) if (inst_name(c) == "Players") { has_players = true; break; }
             if (!has_players) { dm = 0; continue; }
-        } __except (EXCEPTION_EXECUTE_HANDLER) { dm = 0; continue; }
+        }
 
         uintptr_t players = find_child(dm, "Players");
         uintptr_t workspace = find_child(dm, "Workspace");
@@ -259,11 +266,8 @@ static void scanner_thread() {
         Matrix4 vm{};
         Vec3 cam_pos{};
         if (camera) {
-            __try {
-                memcpy(&vm, (void*)(camera + off::Camera_ViewMatrix), sizeof(Matrix4));
-                // Camera CFrame position is usually at ViewMatrix offset - 0x30 or nearby
-                cam_pos = mem<Vec3>(camera + off::CFrame);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            vm = mem<Matrix4>(camera + off::Camera_ViewMatrix);
+            cam_pos = mem<Vec3>(camera + off::CFrame);
         }
 
         // Enumerate players
