@@ -156,17 +156,17 @@ static std::string read_rstr(uintptr_t addr) {
     return std::string(buf, (len < 200) ? (size_t)len : 200);
 }
 
-// theo's two-level name read: inst+0x70 -> NameContainer, +0x8 -> string ptr
+// theo's layout: inst+0x70 -> NameContainer ptr, container+0x8 -> rbxstring struct start
 static std::string inst_name(uintptr_t inst) {
     uintptr_t nc = rpm<uintptr_t>(inst + off::NameContainer);
     if (nc < 0x10000) return "";
-    return read_rstr(rpm<uintptr_t>(nc + off::NameOffset));
+    return read_rstr(nc + off::NameOffset);
 }
 
 static std::string inst_classname(uintptr_t inst) {
     uintptr_t cd = rpm<uintptr_t>(inst + off::ClassDescriptor);
     if (cd < 0x10000) return "";
-    return read_rstr(rpm<uintptr_t>(cd + off::ClassName));
+    return read_rstr(cd + off::ClassName);
 }
 
 // theo's children layout: ChildrenStart(0x78) -> container, start at +0, end at +8, stride 0x10
