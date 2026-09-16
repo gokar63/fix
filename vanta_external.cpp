@@ -30,37 +30,39 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // ================================================================
-// OFFSETS — synced from bunni.lol reference
+// OFFSETS — theo's dump, version-4310300497aa4917 (15/09/2026)
 // ================================================================
 namespace off {
-    int Name              = 0x78;
-    int Children          = 0x80;
-    int Parent            = 0x50;
-    int ClassDescriptor   = 0x18;
-    int ClassName         = 0x8;
+    int NameContainer      = 0x70;
+    int NameOffset         = 0x8;
+    int ChildrenStart      = 0x78;
+    int ChildrenEnd        = 0x8;
+    int Parent             = 0x68;
+    int ClassDescriptor    = 0x18;
+    int ClassName          = 0x8;
 
-    int FDM_Pointer       = 0x67633D8;
-    int FDM_DataModel     = 0x1B8;
+    int FDM_Pointer        = 0x8e42c98;
+    int FDM_DataModel      = 0x1f8;
 
-    int LocalPlayer       = 0x128;
-    int Camera            = 0x418;
+    int LocalPlayer        = 0x130;
+    int ModelInstance       = 0x298;
 
-    int CameraPos         = 0x124;
-    int CameraRotation    = 0x100;
+    int CurrentCamera      = 0x4b8;
 
-    int BasePart_Primitive = 0x178;
-    int Primitive_Position = 0x140;
-    int Primitive_Rotation = 0x124;
+    int CameraPos          = 0xfc;
+    int CameraRotation     = 0xd8;
 
-    int Health            = 0x19C;
-    int MaxHealth         = 0x1BC;
-    int Walkspeed         = 0x1D8;
+    int BasePart_Primitive = 0x188;
+    int Primitive_Position = 0xd4;
+    int Primitive_Rotation = 0xb0;
 
-    int ModelInstance      = 0x330;
+    int Health             = 0x190;
+    int MaxHealth          = 0x1a8;
+    int Walkspeed          = 0x1d0;
 
-    int VE_Pointer        = 0x65A82C8;
-    int VE_ViewMatrix     = 0x4D0;
-    int VE_Dimensions     = 0x740;
+    int VE_Pointer         = 0x846f768;
+    int VE_ViewMatrix      = 0x1b0;
+    int VE_Dimensions      = 0xb10;
 }
 
 static void load_offsets_config(const std::string& dir) {
@@ -72,13 +74,15 @@ static void load_offsets_config(const std::string& dir) {
         char key[64]; int val;
         if (sscanf(line, "%63[^=]=%i", key, &val) == 2) {
             std::string k(key);
-            if (k == "Name") off::Name = val;
-            else if (k == "Children") off::Children = val;
+            if (k == "NameContainer") off::NameContainer = val;
+            else if (k == "NameOffset") off::NameOffset = val;
+            else if (k == "ChildrenStart") off::ChildrenStart = val;
+            else if (k == "ChildrenEnd") off::ChildrenEnd = val;
             else if (k == "Parent") off::Parent = val;
             else if (k == "FDM_Pointer") off::FDM_Pointer = val;
             else if (k == "FDM_DataModel") off::FDM_DataModel = val;
             else if (k == "LocalPlayer") off::LocalPlayer = val;
-            else if (k == "Camera") off::Camera = val;
+            else if (k == "CurrentCamera") off::CurrentCamera = val;
             else if (k == "BasePart_Primitive") off::BasePart_Primitive = val;
             else if (k == "Primitive_Position") off::Primitive_Position = val;
             else if (k == "Primitive_Rotation") off::Primitive_Rotation = val;
@@ -136,7 +140,7 @@ static bool rpm_buf(uintptr_t addr, void* buf, size_t sz) {
     return ReadProcessMemory(g_proc, (LPCVOID)addr, buf, sz, &rd) && rd == sz;
 }
 
-// SSO-aware string read — bunni's approach: len < 16 = inline, else pointer
+// SSO-aware string read: len < 16 = inline, else heap pointer
 static std::string read_rstr(uintptr_t addr) {
     if (addr < 0x10000) return "";
     uint64_t len = rpm<uint64_t>(addr + 0x10);
@@ -152,8 +156,11 @@ static std::string read_rstr(uintptr_t addr) {
     return std::string(buf, (len < 200) ? (size_t)len : 200);
 }
 
+// theo's two-level name read: inst+0x70 -> NameContainer, +0x8 -> string ptr
 static std::string inst_name(uintptr_t inst) {
-    return read_rstr(rpm<uintptr_t>(inst + off::Name));
+    uintptr_t nc = rpm<uintptr_t>(inst + off::NameContainer);
+    if (nc < 0x10000) return "";
+    return read_rstr(rpm<uintptr_t>(nc + off::NameOffset));
 }
 
 static std::string inst_classname(uintptr_t inst) {
@@ -162,13 +169,13 @@ static std::string inst_classname(uintptr_t inst) {
     return read_rstr(rpm<uintptr_t>(cd + off::ClassName));
 }
 
-// children at 0x10 stride (bunni's layout)
+// theo's children layout: ChildrenStart(0x78) -> container, start at +0, end at +8, stride 0x10
 static std::vector<uintptr_t> get_children(uintptr_t inst) {
     std::vector<uintptr_t> out;
-    uintptr_t cp = rpm<uintptr_t>(inst + off::Children);
+    uintptr_t cp = rpm<uintptr_t>(inst + off::ChildrenStart);
     if (cp < 0x10000) return out;
     uintptr_t start = rpm<uintptr_t>(cp);
-    uintptr_t end = rpm<uintptr_t>(cp + 8);
+    uintptr_t end = rpm<uintptr_t>(cp + off::ChildrenEnd);
     if (start < 0x10000 || end <= start || end - start > 0x50000) return out;
     size_t count = (end - start) / 0x10;
     if (count > 500) return out;
@@ -192,7 +199,7 @@ static uintptr_t find_child_of_class(uintptr_t inst, const std::string& cls) {
 }
 
 // ================================================================
-// MATH — bunni's quaternion-based world_to_screen
+// MATH
 // ================================================================
 struct Vec3 { float x, y, z; };
 struct Vec2 { float x, y; };
@@ -204,7 +211,6 @@ static Vec3 get_part_position(uintptr_t part) {
     return rpm<Vec3>(prim + off::Primitive_Position);
 }
 
-// bunni's world_to_screen: flat 16-element matrix, quaternion projection
 static Vec2 world_to_screen(const Vec3& world, const ViewMatrix& vm, float dims_x, float dims_y) {
     float qx = (world.x * vm.data[0]) + (world.y * vm.data[1]) + (world.z * vm.data[2]) + vm.data[3];
     float qy = (world.x * vm.data[4]) + (world.y * vm.data[5]) + (world.z * vm.data[6]) + vm.data[7];
@@ -267,7 +273,7 @@ static HWND g_overlay_hwnd = nullptr;
 static HWND g_game_hwnd    = nullptr;
 
 // ================================================================
-// DATAMODEL — bunni's FakeDataModelPointer path
+// DATAMODEL — FakeDataModelPointer path
 // ================================================================
 static uintptr_t find_datamodel() {
     if (!g_roblox_base) return 0;
@@ -311,14 +317,12 @@ static void scanner_thread() {
         if (local_player < 0x10000) { Sleep(200); continue; }
         std::string local_name = inst_name(local_player);
 
-        // read view matrix from VisualEngine
         uintptr_t ve = rpm<uintptr_t>(g_roblox_base + off::VE_Pointer);
         ViewMatrix vm{};
         if (ve > 0x10000) {
             vm = rpm<ViewMatrix>(ve + off::VE_ViewMatrix);
         }
 
-        // read dimensions from VisualEngine
         Vec2 dims = {g_screen_w, g_screen_h};
         if (ve > 0x10000) {
             float dw = rpm<float>(ve + off::VE_Dimensions);
@@ -326,7 +330,6 @@ static void scanner_thread() {
             if (dw > 100 && dh > 100) { dims.x = dw; dims.y = dh; }
         }
 
-        // local player position for distance calc
         Vec3 local_pos{};
         uintptr_t lchar = rpm<uintptr_t>(local_player + off::ModelInstance);
         if (lchar > 0x10000) {
@@ -339,7 +342,6 @@ static void scanner_thread() {
             std::string pname = inst_name(p);
             if (pname.empty() || pname == local_name) continue;
 
-            // bunni uses ModelInstance (0x330) for Player->Character
             uintptr_t character = rpm<uintptr_t>(p + off::ModelInstance);
             if (character < 0x10000) continue;
 
@@ -350,7 +352,6 @@ static void scanner_thread() {
             Vec3 root_pos = get_part_position(hrp);
             if (root_pos.x == 0.0f && root_pos.y == 0.0f && root_pos.z == 0.0f) continue;
 
-            // bunni's head+2.5y / legs-3.5y projection
             Vec3 head_pos = head ? get_part_position(head) : root_pos;
             Vec3 head_top = { head_pos.x, head_pos.y + 2.5f, head_pos.z };
             Vec3 feet_pos = { root_pos.x, root_pos.y - 3.5f, root_pos.z };
@@ -392,7 +393,7 @@ static void scanner_thread() {
 }
 
 // ================================================================
-// ESP RENDERING — bunni-style box ESP from head/feet screen positions
+// ESP RENDERING
 // ================================================================
 static void draw_outlined_text(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* text) {
     ImU32 shadow = IM_COL32(0, 0, 0, 200);
@@ -410,7 +411,6 @@ static void render_esp() {
     for (const auto& p : g_players) {
         if (!p.on_screen) continue;
 
-        // bunni-style: box height from head to feet screen positions
         float box_height = p.feet_screen.y - p.head_screen.y;
         if (box_height < 10.0f) continue;
         float box_width = box_height / 1.6f;
@@ -541,7 +541,7 @@ static void init_imgui_style() {
 }
 
 // ================================================================
-// OVERLAY WINDOW — bunni-style with WS_EX_NOACTIVATE + fullscreen detect
+// OVERLAY WINDOW
 // ================================================================
 static LRESULT CALLBACK overlay_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (g_menu_open && ImGui_ImplWin32_WndProcHandler(h, m, w, l)) return 0;
@@ -725,7 +725,6 @@ int main() {
             break;
         }
 
-        // hide overlay when Roblox is not foreground (bunni's approach)
         HWND fg = GetForegroundWindow();
         if (fg != g_game_hwnd && fg != g_overlay_hwnd) {
             ShowWindow(g_overlay_hwnd, SW_HIDE);
@@ -735,7 +734,6 @@ int main() {
         if (!IsWindowVisible(g_overlay_hwnd))
             ShowWindow(g_overlay_hwnd, SW_SHOWNOACTIVATE);
 
-        // track Roblox window position/size with fullscreen detection
         RECT rc;
         if (is_fullscreen(g_game_hwnd)) {
             HMONITOR mon = MonitorFromWindow(g_game_hwnd, MONITOR_DEFAULTTONEAREST);
@@ -751,11 +749,9 @@ int main() {
         g_screen_w = (float)w;
         g_screen_h = (float)h;
 
-        // DELETE key toggle (bunni uses DELETE)
         if (GetAsyncKeyState(VK_DELETE) & 1) g_menu_open = !g_menu_open.load();
         if (GetAsyncKeyState(VK_END) & 1) { g_running = false; break; }
 
-        // toggle click-through based on menu state
         LONG_PTR exStyle = GetWindowLongPtrA(g_overlay_hwnd, GWL_EXSTYLE);
         if (g_menu_open) {
             if (exStyle & WS_EX_TRANSPARENT)
@@ -765,7 +761,6 @@ int main() {
                 SetWindowLongPtrA(g_overlay_hwnd, GWL_EXSTYLE, exStyle | WS_EX_TRANSPARENT);
         }
 
-        // render
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
