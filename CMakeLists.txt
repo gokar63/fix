@@ -85,3 +85,7 @@ target_link_libraries(vanta_dll PRIVATE imgui_lib user32 gdi32 d3d11 dxgi)
 # Injector — manual map loader
 add_executable(injector injector.cpp)
 target_link_libraries(injector PRIVATE advapi32)
+
+# VANTA External — overlay ESP (no injection, bypasses Byfron)
+add_executable(vanta_external vanta_external.cpp)
+target_link_libraries(vanta_external PRIVATE imgui_lib user32 gdi32 d3d11 dxgi dwmapi psapi advapi32)
