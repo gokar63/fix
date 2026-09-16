@@ -156,7 +156,7 @@ static std::string read_rstr(uintptr_t addr) {
     return std::string(buf, (len < 200) ? (size_t)len : 200);
 }
 
-// theo's layout: inst+0x70 -> NameContainer ptr, container+0x8 -> rbxstring struct start
+// theo's layout: inst+0x70 -> NameContainer ptr, container+0x8 IS the rbxstring struct start
 static std::string inst_name(uintptr_t inst) {
     uintptr_t nc = rpm<uintptr_t>(inst + off::NameContainer);
     if (nc < 0x10000) return "";
