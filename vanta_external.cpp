@@ -1,6 +1,5 @@
 // language: C++17, file: vanta_external.cpp, target: Windows 11 x64, MSVC
-// fully external — RPM-based memory read + transparent DX11 overlay
-// bypasses Byfron entirely: zero code inside Roblox process
+// fully external — RPM + transparent DX11 overlay, bypasses Byfron
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -31,36 +30,37 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // ================================================================
-// OFFSETS — version-4310300497aa4917
+// OFFSETS — synced from bunni.lol reference
 // ================================================================
 namespace off {
-    int Name = 0x70;
-    int Children = 0x78;
-    int Parent = 0x68;
-    int ClassDescriptor = 0x18;
-    int ClassName = 0x8;
+    int Name              = 0x78;
+    int Children          = 0x80;
+    int Parent            = 0x50;
+    int ClassDescriptor   = 0x18;
+    int ClassName         = 0x8;
 
-    int FDM_Pointer = 0x8E42C98;
-    int FDM_DataModel = 0x1F8;
+    int FDM_Pointer       = 0x67633D8;
+    int FDM_DataModel     = 0x1B8;
 
-    int LocalPlayer = 0x130;
-    int Workspace_CurrentCamera = 0x4B8;
+    int LocalPlayer       = 0x128;
+    int Camera            = 0x418;
 
-    int Camera_Position = 0xFC;
-    int Camera_Rotation = 0xD8;
+    int CameraPos         = 0x124;
+    int CameraRotation    = 0x100;
 
-    int BasePart_Primitive = 0x188;
-    int Primitive_Position = 0xD4;
-    int Primitive_Rotation = 0xB0;
+    int BasePart_Primitive = 0x178;
+    int Primitive_Position = 0x140;
+    int Primitive_Rotation = 0x124;
 
-    int Health = 0x190;
-    int MaxHealth = 0x1A8;
-    int Walkspeed = 0x1D0;
+    int Health            = 0x19C;
+    int MaxHealth         = 0x1BC;
+    int Walkspeed         = 0x1D8;
 
-    int Player_Character = 0x298;
+    int ModelInstance      = 0x330;
 
-    int VE_ViewMatrix = 0x1B0;
-    int VE_Pointer = 0x846F768;
+    int VE_Pointer        = 0x65A82C8;
+    int VE_ViewMatrix     = 0x4D0;
+    int VE_Dimensions     = 0x740;
 }
 
 static void load_offsets_config(const std::string& dir) {
@@ -72,17 +72,23 @@ static void load_offsets_config(const std::string& dir) {
         char key[64]; int val;
         if (sscanf(line, "%63[^=]=%i", key, &val) == 2) {
             std::string k(key);
-            if (k == "FDM_Pointer") off::FDM_Pointer = val;
+            if (k == "Name") off::Name = val;
+            else if (k == "Children") off::Children = val;
+            else if (k == "Parent") off::Parent = val;
+            else if (k == "FDM_Pointer") off::FDM_Pointer = val;
             else if (k == "FDM_DataModel") off::FDM_DataModel = val;
             else if (k == "LocalPlayer") off::LocalPlayer = val;
-            else if (k == "Workspace_CurrentCamera") off::Workspace_CurrentCamera = val;
+            else if (k == "Camera") off::Camera = val;
             else if (k == "BasePart_Primitive") off::BasePart_Primitive = val;
             else if (k == "Primitive_Position") off::Primitive_Position = val;
+            else if (k == "Primitive_Rotation") off::Primitive_Rotation = val;
             else if (k == "Health") off::Health = val;
             else if (k == "MaxHealth") off::MaxHealth = val;
-            else if (k == "Player_Character") off::Player_Character = val;
-            else if (k == "VE_ViewMatrix") off::VE_ViewMatrix = val;
+            else if (k == "Walkspeed") off::Walkspeed = val;
+            else if (k == "ModelInstance") off::ModelInstance = val;
             else if (k == "VE_Pointer") off::VE_Pointer = val;
+            else if (k == "VE_ViewMatrix") off::VE_ViewMatrix = val;
+            else if (k == "VE_Dimensions") off::VE_Dimensions = val;
         }
     }
     fclose(f);
@@ -114,7 +120,7 @@ static uintptr_t get_module_base(DWORD pid, const wchar_t* mod_name) {
 }
 
 // ================================================================
-// RPM — external memory read via ReadProcessMemory
+// RPM — external memory read
 // ================================================================
 static HANDLE g_proc = nullptr;
 
@@ -130,17 +136,18 @@ static bool rpm_buf(uintptr_t addr, void* buf, size_t sz) {
     return ReadProcessMemory(g_proc, (LPCVOID)addr, buf, sz, &rd) && rd == sz;
 }
 
+// SSO-aware string read — bunni's approach: len < 16 = inline, else pointer
 static std::string read_rstr(uintptr_t addr) {
     if (addr < 0x10000) return "";
     uint64_t len = rpm<uint64_t>(addr + 0x10);
     if (len == 0 || len > 200) return "";
     char buf[201]{};
-    if (len > 15) {
+    if (len >= 16) {
         uintptr_t ptr = rpm<uintptr_t>(addr);
         if (ptr < 0x10000) return "";
         rpm_buf(ptr, buf, (len < 200) ? (size_t)len : 200);
     } else {
-        rpm_buf(addr, buf, (len < 200) ? (size_t)len : 200);
+        rpm_buf(addr, buf, (size_t)len);
     }
     return std::string(buf, (len < 200) ? (size_t)len : 200);
 }
@@ -155,6 +162,7 @@ static std::string inst_classname(uintptr_t inst) {
     return read_rstr(rpm<uintptr_t>(cd + off::ClassName));
 }
 
+// children at 0x10 stride (bunni's layout)
 static std::vector<uintptr_t> get_children(uintptr_t inst) {
     std::vector<uintptr_t> out;
     uintptr_t cp = rpm<uintptr_t>(inst + off::Children);
@@ -177,12 +185,18 @@ static uintptr_t find_child(uintptr_t inst, const std::string& name) {
     return 0;
 }
 
+static uintptr_t find_child_of_class(uintptr_t inst, const std::string& cls) {
+    for (uintptr_t c : get_children(inst))
+        if (inst_classname(c) == cls) return c;
+    return 0;
+}
+
 // ================================================================
-// MATH
+// MATH — bunni's quaternion-based world_to_screen
 // ================================================================
 struct Vec3 { float x, y, z; };
 struct Vec2 { float x, y; };
-struct Matrix4 { float m[4][4]; };
+struct ViewMatrix { float data[16]; };
 
 static Vec3 get_part_position(uintptr_t part) {
     uintptr_t prim = rpm<uintptr_t>(part + off::BasePart_Primitive);
@@ -190,19 +204,27 @@ static Vec3 get_part_position(uintptr_t part) {
     return rpm<Vec3>(prim + off::Primitive_Position);
 }
 
-static Vec2 world_to_screen(const Vec3& pos, const Matrix4& vm, int w, int h) {
-    float cx = vm.m[0][0]*pos.x + vm.m[1][0]*pos.y + vm.m[2][0]*pos.z + vm.m[3][0];
-    float cy = vm.m[0][1]*pos.x + vm.m[1][1]*pos.y + vm.m[2][1]*pos.z + vm.m[3][1];
-    float cw = vm.m[0][3]*pos.x + vm.m[1][3]*pos.y + vm.m[2][3]*pos.z + vm.m[3][3];
-    if (cw < 0.001f) return {-1, -1};
-    float nx = cx / cw;
-    float ny = cy / cw;
-    return { (1.0f + nx) * 0.5f * w, (1.0f - ny) * 0.5f * h };
+// bunni's world_to_screen: flat 16-element matrix, quaternion projection
+static Vec2 world_to_screen(const Vec3& world, const ViewMatrix& vm, float dims_x, float dims_y) {
+    float qx = (world.x * vm.data[0]) + (world.y * vm.data[1]) + (world.z * vm.data[2]) + vm.data[3];
+    float qy = (world.x * vm.data[4]) + (world.y * vm.data[5]) + (world.z * vm.data[6]) + vm.data[7];
+    float qw = (world.x * vm.data[12]) + (world.y * vm.data[13]) + (world.z * vm.data[14]) + vm.data[15];
+
+    if (qw < 0.1f) return {-1, -1};
+
+    float inv_w = 1.0f / qw;
+    float ndc_x = qx * inv_w;
+    float ndc_y = qy * inv_w;
+
+    float screen_x = (dims_x * 0.5f * ndc_x) + (ndc_x + dims_x * 0.5f);
+    float screen_y = -(dims_y * 0.5f * ndc_y) + (ndc_y + dims_y * 0.5f);
+
+    return { screen_x, screen_y };
 }
 
 static float dist3d(Vec3 a, Vec3 b) {
-    float dx = a.x-b.x, dy = a.y-b.y, dz = a.z-b.z;
-    return sqrtf(dx*dx + dy*dy + dz*dz);
+    float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+    return sqrtf(dx * dx + dy * dy + dz * dz);
 }
 
 // ================================================================
@@ -210,10 +232,13 @@ static float dist3d(Vec3 a, Vec3 b) {
 // ================================================================
 struct PlayerInfo {
     std::string name;
-    Vec3 position;
+    Vec3 head_pos;
+    Vec3 root_pos;
     float health;
     float max_health;
-    Vec2 screen;
+    Vec2 head_screen;
+    Vec2 feet_screen;
+    Vec2 root_screen;
     bool on_screen;
     float distance;
 };
@@ -232,38 +257,36 @@ static std::atomic<bool> g_snaplines{false};
 static std::atomic<bool> g_distance{true};
 static std::atomic<float> g_aim_fov{200.0f};
 static std::atomic<bool> g_menu_open{false};
-static int g_screen_w = 1920, g_screen_h = 1080;
+static float g_screen_w = 1920.0f, g_screen_h = 1080.0f;
 
-// DX11 — our own device, not hooked
-static ID3D11Device*           g_device  = nullptr;
-static ID3D11DeviceContext*    g_context = nullptr;
+static ID3D11Device*           g_device    = nullptr;
+static ID3D11DeviceContext*    g_context   = nullptr;
 static IDXGISwapChain*         g_swapchain = nullptr;
-static ID3D11RenderTargetView* g_rtv     = nullptr;
+static ID3D11RenderTargetView* g_rtv       = nullptr;
 static HWND g_overlay_hwnd = nullptr;
-static HWND g_game_hwnd = nullptr;
+static HWND g_game_hwnd    = nullptr;
 
 // ================================================================
-// DATAMODEL FINDER (external via RPM)
+// DATAMODEL — bunni's FakeDataModelPointer path
 // ================================================================
 static uintptr_t find_datamodel() {
     if (!g_roblox_base) return 0;
 
     uintptr_t fdm_ptr = rpm<uintptr_t>(g_roblox_base + off::FDM_Pointer);
-    if (fdm_ptr > 0x10000 && fdm_ptr < 0x7FFFFFFFFFFF) {
-        uintptr_t dm = rpm<uintptr_t>(fdm_ptr + off::FDM_DataModel);
-        if (dm > 0x10000) {
-            auto ch = get_children(dm);
-            int known = 0;
-            for (auto c : ch) {
-                std::string n = inst_name(c);
-                if (n == "Workspace" || n == "Players" || n == "Lighting" ||
-                    n == "ReplicatedStorage" || n == "StarterGui")
-                    known++;
-            }
-            if (known >= 3) return dm;
-        }
+    if (fdm_ptr < 0x10000 || fdm_ptr > 0x7FFFFFFFFFFF) return 0;
+
+    uintptr_t dm = rpm<uintptr_t>(fdm_ptr + off::FDM_DataModel);
+    if (dm < 0x10000) return 0;
+
+    auto ch = get_children(dm);
+    int known = 0;
+    for (auto c : ch) {
+        std::string n = inst_name(c);
+        if (n == "Workspace" || n == "Players" || n == "Lighting" ||
+            n == "ReplicatedStorage" || n == "StarterGui")
+            known++;
     }
-    return 0;
+    return (known >= 3) ? dm : 0;
 }
 
 // ================================================================
@@ -282,18 +305,33 @@ static void scanner_thread() {
         }
 
         uintptr_t players = find_child(dm, "Players");
-        uintptr_t workspace = find_child(dm, "Workspace");
-        if (!players || !workspace) { Sleep(500); continue; }
+        if (!players) { Sleep(500); continue; }
 
         uintptr_t local_player = rpm<uintptr_t>(players + off::LocalPlayer);
         if (local_player < 0x10000) { Sleep(200); continue; }
         std::string local_name = inst_name(local_player);
 
-        uintptr_t camera = rpm<uintptr_t>(workspace + off::Workspace_CurrentCamera);
-        Matrix4 vm{};
-        if (camera > 0x10000) {
-            uintptr_t ve = rpm<uintptr_t>(g_roblox_base + off::VE_Pointer);
-            if (ve > 0x10000) vm = rpm<Matrix4>(ve + off::VE_ViewMatrix);
+        // read view matrix from VisualEngine
+        uintptr_t ve = rpm<uintptr_t>(g_roblox_base + off::VE_Pointer);
+        ViewMatrix vm{};
+        if (ve > 0x10000) {
+            vm = rpm<ViewMatrix>(ve + off::VE_ViewMatrix);
+        }
+
+        // read dimensions from VisualEngine
+        Vec2 dims = {g_screen_w, g_screen_h};
+        if (ve > 0x10000) {
+            float dw = rpm<float>(ve + off::VE_Dimensions);
+            float dh = rpm<float>(ve + off::VE_Dimensions + 4);
+            if (dw > 100 && dh > 100) { dims.x = dw; dims.y = dh; }
+        }
+
+        // local player position for distance calc
+        Vec3 local_pos{};
+        uintptr_t lchar = rpm<uintptr_t>(local_player + off::ModelInstance);
+        if (lchar > 0x10000) {
+            uintptr_t lhrp = find_child(lchar, "HumanoidRootPart");
+            if (lhrp) local_pos = get_part_position(lhrp);
         }
 
         std::vector<PlayerInfo> new_players;
@@ -301,14 +339,21 @@ static void scanner_thread() {
             std::string pname = inst_name(p);
             if (pname.empty() || pname == local_name) continue;
 
-            uintptr_t character = rpm<uintptr_t>(p + off::Player_Character);
+            // bunni uses ModelInstance (0x330) for Player->Character
+            uintptr_t character = rpm<uintptr_t>(p + off::ModelInstance);
             if (character < 0x10000) continue;
 
+            uintptr_t head = find_child(character, "Head");
             uintptr_t hrp = find_child(character, "HumanoidRootPart");
             if (!hrp) continue;
 
-            Vec3 pos = get_part_position(hrp);
-            if (pos.x == 0.0f && pos.y == 0.0f && pos.z == 0.0f) continue;
+            Vec3 root_pos = get_part_position(hrp);
+            if (root_pos.x == 0.0f && root_pos.y == 0.0f && root_pos.z == 0.0f) continue;
+
+            // bunni's head+2.5y / legs-3.5y projection
+            Vec3 head_pos = head ? get_part_position(head) : root_pos;
+            Vec3 head_top = { head_pos.x, head_pos.y + 2.5f, head_pos.z };
+            Vec3 feet_pos = { root_pos.x, root_pos.y - 3.5f, root_pos.z };
 
             uintptr_t humanoid = find_child(character, "Humanoid");
             float hp = 100.0f, max_hp = 100.0f;
@@ -319,24 +364,25 @@ static void scanner_thread() {
                 if (hp < 0.0f) hp = 0.0f;
             }
 
-            Vec2 scr = world_to_screen(pos, vm, g_screen_w, g_screen_h);
-            bool on = (scr.x >= 0 && scr.x < g_screen_w && scr.y >= 0 && scr.y < g_screen_h);
+            Vec2 head_scr = world_to_screen(head_top, vm, dims.x, dims.y);
+            Vec2 feet_scr = world_to_screen(feet_pos, vm, dims.x, dims.y);
+            Vec2 root_scr = world_to_screen(root_pos, vm, dims.x, dims.y);
 
-            Vec3 local_pos{};
-            uintptr_t lchar = rpm<uintptr_t>(local_player + off::Player_Character);
-            if (lchar > 0x10000) {
-                uintptr_t lhrp = find_child(lchar, "HumanoidRootPart");
-                if (lhrp) local_pos = get_part_position(lhrp);
-            }
+            bool on = (head_scr.x >= 0 && feet_scr.x >= 0 &&
+                       head_scr.x < dims.x && head_scr.y >= 0 &&
+                       feet_scr.y < dims.y);
 
             PlayerInfo pi;
             pi.name = pname;
-            pi.position = pos;
+            pi.head_pos = head_pos;
+            pi.root_pos = root_pos;
             pi.health = hp;
             pi.max_health = max_hp;
-            pi.screen = scr;
+            pi.head_screen = head_scr;
+            pi.feet_screen = feet_scr;
+            pi.root_screen = root_scr;
             pi.on_screen = on;
-            pi.distance = dist3d(pos, local_pos);
+            pi.distance = dist3d(root_pos, local_pos);
             new_players.push_back(pi);
         }
 
@@ -346,8 +392,17 @@ static void scanner_thread() {
 }
 
 // ================================================================
-// IMGUI RENDERING
+// ESP RENDERING — bunni-style box ESP from head/feet screen positions
 // ================================================================
+static void draw_outlined_text(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* text) {
+    ImU32 shadow = IM_COL32(0, 0, 0, 200);
+    for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++)
+            if (dx || dy)
+                dl->AddText(ImVec2(pos.x + dx, pos.y + dy), shadow, text);
+    dl->AddText(pos, col, text);
+}
+
 static void render_esp() {
     auto* dl = ImGui::GetBackgroundDrawList();
     std::lock_guard<std::mutex> lk(g_mtx);
@@ -355,22 +410,29 @@ static void render_esp() {
     for (const auto& p : g_players) {
         if (!p.on_screen) continue;
 
-        float sx = p.screen.x, sy = p.screen.y;
-        float scale = 1000.0f / (p.distance + 100.0f);
-        float bw = 40.0f * scale, bh = 90.0f * scale;
-        if (bw < 10) bw = 10; if (bh < 20) bh = 20;
-        if (bw > 200) bw = 200; if (bh > 400) bh = 400;
+        // bunni-style: box height from head to feet screen positions
+        float box_height = p.feet_screen.y - p.head_screen.y;
+        if (box_height < 10.0f) continue;
+        float box_width = box_height / 1.6f;
+
+        float cx = (p.head_screen.x + p.feet_screen.x) * 0.5f;
+        float bx = cx - box_width * 0.5f;
+        float by = p.head_screen.y;
 
         float ratio = (p.max_health > 0) ? p.health / p.max_health : 1.0f;
         if (ratio > 1.0f) ratio = 1.0f;
-        ImU32 col = (ratio > 0.5f) ? IM_COL32(0,255,0,255)
-                  : (ratio > 0.25f) ? IM_COL32(255,255,0,255)
-                  : IM_COL32(255,0,0,255);
+        ImU32 col = (ratio > 0.5f) ? IM_COL32(0, 255, 0, 255)
+                  : (ratio > 0.25f) ? IM_COL32(255, 255, 0, 255)
+                  : IM_COL32(255, 0, 0, 255);
 
-        float bx = sx - bw * 0.5f, by = sy - bh;
-
-        if (g_boxes)
-            dl->AddRect(ImVec2(bx, by), ImVec2(bx + bw, by + bh), col, 0, 0, 2.0f);
+        if (g_boxes) {
+            dl->AddRect(ImVec2(bx - 1, by - 1),
+                        ImVec2(bx + box_width + 1, by + box_height + 1),
+                        IM_COL32(0, 0, 0, 180), 0, 0, 3.0f);
+            dl->AddRect(ImVec2(bx, by),
+                        ImVec2(bx + box_width, by + box_height),
+                        col, 0, 0, 1.5f);
+        }
 
         if (g_names) {
             char buf[128];
@@ -379,20 +441,20 @@ static void render_esp() {
             else
                 snprintf(buf, sizeof(buf), "%s", p.name.c_str());
             ImVec2 tsz = ImGui::CalcTextSize(buf);
-            dl->AddText(ImVec2(sx - tsz.x * 0.5f, by - 18), IM_COL32(255,255,255,255), buf);
+            draw_outlined_text(dl, ImVec2(cx - tsz.x * 0.5f, by - 18), IM_COL32(255, 255, 255, 255), buf);
         }
 
         if (g_health_bar) {
             float bar_x = bx - 6;
-            dl->AddRectFilled(ImVec2(bar_x, by), ImVec2(bar_x + 4, by + bh), IM_COL32(40,40,40,200));
+            dl->AddRectFilled(ImVec2(bar_x, by), ImVec2(bar_x + 4, by + box_height), IM_COL32(40, 40, 40, 200));
             int gh = (int)(ratio * 255), rh = (int)((1 - ratio) * 255);
-            dl->AddRectFilled(ImVec2(bar_x, by + bh * (1 - ratio)),
-                ImVec2(bar_x + 4, by + bh), IM_COL32(rh, gh, 0, 255));
+            dl->AddRectFilled(ImVec2(bar_x, by + box_height * (1 - ratio)),
+                ImVec2(bar_x + 4, by + box_height), IM_COL32(rh, gh, 0, 255));
         }
 
         if (g_snaplines)
-            dl->AddLine(ImVec2((float)g_screen_w * 0.5f, (float)g_screen_h),
-                ImVec2(sx, sy), col, 1.0f);
+            dl->AddLine(ImVec2(g_screen_w * 0.5f, g_screen_h),
+                ImVec2(p.root_screen.x, p.root_screen.y), col, 1.0f);
     }
 }
 
@@ -422,7 +484,7 @@ static void render_menu() {
         std::lock_guard<std::mutex> lk(g_mtx);
         ImGui::Text("Players: %d", (int)g_players.size());
     }
-    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "[INSERT] Toggle Menu");
+    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "[DELETE] Toggle Menu");
     ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "[END] Exit");
 
     ImGui::End();
@@ -437,10 +499,10 @@ static void aimbot_tick() {
         std::lock_guard<std::mutex> lk(g_mtx);
         for (const auto& p : g_players) {
             if (!p.on_screen || p.health <= 0) continue;
-            float dx = p.screen.x - g_screen_w * 0.5f;
-            float dy = p.screen.y - g_screen_h * 0.5f;
+            float dx = p.head_screen.x - g_screen_w * 0.5f;
+            float dy = p.head_screen.y - g_screen_h * 0.5f;
             float d = sqrtf(dx * dx + dy * dy);
-            if (d < best_dist) { best_dist = d; best_pos = p.screen; }
+            if (d < best_dist) { best_dist = d; best_pos = p.head_screen; }
         }
     }
 
@@ -479,14 +541,22 @@ static void init_imgui_style() {
 }
 
 // ================================================================
-// OVERLAY WINDOW
+// OVERLAY WINDOW — bunni-style with WS_EX_NOACTIVATE + fullscreen detect
 // ================================================================
 static LRESULT CALLBACK overlay_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (g_menu_open && ImGui_ImplWin32_WndProcHandler(h, m, w, l)) return 0;
-    if (m == WM_KEYDOWN && w == VK_INSERT) g_menu_open = !g_menu_open.load();
-    if (m == WM_KEYDOWN && w == VK_END) { g_running = false; PostQuitMessage(0); }
     if (m == WM_DESTROY) { g_running = false; PostQuitMessage(0); return 0; }
     return DefWindowProcA(h, m, w, l);
+}
+
+static bool is_fullscreen(HWND hwnd) {
+    RECT wr;
+    GetWindowRect(hwnd, &wr);
+    HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+    GetMonitorInfo(mon, &mi);
+    return (wr.left == mi.rcMonitor.left && wr.top == mi.rcMonitor.top &&
+            wr.right == mi.rcMonitor.right && wr.bottom == mi.rcMonitor.bottom);
 }
 
 static bool create_overlay(HINSTANCE hInst) {
@@ -499,15 +569,23 @@ static bool create_overlay(HINSTANCE hInst) {
     RegisterClassExA(&wc);
 
     RECT rc;
-    GetWindowRect(g_game_hwnd, &rc);
+    if (is_fullscreen(g_game_hwnd)) {
+        HMONITOR mon = MonitorFromWindow(g_game_hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+        GetMonitorInfo(mon, &mi);
+        rc = mi.rcMonitor;
+    } else {
+        GetWindowRect(g_game_hwnd, &rc);
+    }
+
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
-    g_screen_w = w;
-    g_screen_h = h;
+    g_screen_w = (float)w;
+    g_screen_h = (float)h;
 
     g_overlay_hwnd = CreateWindowExA(
-        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED,
-        "VantaOverlay", "VANTA",
+        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        "VantaOverlay", "",
         WS_POPUP,
         rc.left, rc.top, w, h,
         nullptr, nullptr, hInst, nullptr);
@@ -518,7 +596,7 @@ static bool create_overlay(HINSTANCE hInst) {
     MARGINS margin = {-1};
     DwmExtendFrameIntoClientArea(g_overlay_hwnd, &margin);
 
-    ShowWindow(g_overlay_hwnd, SW_SHOW);
+    ShowWindow(g_overlay_hwnd, SW_SHOWNOACTIVATE);
     UpdateWindow(g_overlay_hwnd);
     return true;
 }
@@ -526,8 +604,8 @@ static bool create_overlay(HINSTANCE hInst) {
 static bool create_dx11_device() {
     DXGI_SWAP_CHAIN_DESC sd{};
     sd.BufferCount = 2;
-    sd.BufferDesc.Width = g_screen_w;
-    sd.BufferDesc.Height = g_screen_h;
+    sd.BufferDesc.Width = (UINT)g_screen_w;
+    sd.BufferDesc.Height = (UINT)g_screen_h;
     sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     sd.BufferDesc.RefreshRate.Numerator = 60;
     sd.BufferDesc.RefreshRate.Denominator = 1;
@@ -566,7 +644,7 @@ int main() {
     char exe_path[MAX_PATH];
     GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
     std::string dir(exe_path);
-    size_t sl = dir.find_last_of("\\/");
+    size_t sl = dir.find_last_of("\\\/");
     if (sl != std::string::npos) dir = dir.substr(0, sl + 1);
     load_offsets_config(dir);
 
@@ -612,7 +690,7 @@ int main() {
         printf("[!] Failed to create overlay\n");
         CloseHandle(g_proc); system("pause"); return 1;
     }
-    printf("[+] Overlay created (%dx%d)\n", g_screen_w, g_screen_h);
+    printf("[+] Overlay created (%.0fx%.0f)\n", g_screen_w, g_screen_h);
 
     if (!create_dx11_device()) {
         printf("[!] Failed to create DX11 device\n");
@@ -630,7 +708,7 @@ int main() {
 
     std::thread scanner(scanner_thread);
     printf("[+] Scanner started\n");
-    printf("[+] Press INSERT for menu, END to exit\n\n");
+    printf("[+] Press DELETE for menu, END to exit\n\n");
 
     MSG msg{};
     while (g_running) {
@@ -641,22 +719,41 @@ int main() {
         }
         if (!g_running) break;
 
-        // check if Roblox is still running
         DWORD exitCode = 0;
         if (!GetExitCodeProcess(g_proc, &exitCode) || exitCode != STILL_ACTIVE) {
             printf("[*] Roblox closed\n");
             break;
         }
 
-        // track Roblox window position/size
-        RECT rc;
-        if (GetWindowRect(g_game_hwnd, &rc)) {
-            int w = rc.right - rc.left;
-            int h = rc.bottom - rc.top;
-            MoveWindow(g_overlay_hwnd, rc.left, rc.top, w, h, FALSE);
-            g_screen_w = w;
-            g_screen_h = h;
+        // hide overlay when Roblox is not foreground (bunni's approach)
+        HWND fg = GetForegroundWindow();
+        if (fg != g_game_hwnd && fg != g_overlay_hwnd) {
+            ShowWindow(g_overlay_hwnd, SW_HIDE);
+            Sleep(100);
+            continue;
         }
+        if (!IsWindowVisible(g_overlay_hwnd))
+            ShowWindow(g_overlay_hwnd, SW_SHOWNOACTIVATE);
+
+        // track Roblox window position/size with fullscreen detection
+        RECT rc;
+        if (is_fullscreen(g_game_hwnd)) {
+            HMONITOR mon = MonitorFromWindow(g_game_hwnd, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+            GetMonitorInfo(mon, &mi);
+            rc = mi.rcMonitor;
+        } else {
+            GetWindowRect(g_game_hwnd, &rc);
+        }
+        int w = rc.right - rc.left;
+        int h = rc.bottom - rc.top;
+        MoveWindow(g_overlay_hwnd, rc.left, rc.top, w, h, FALSE);
+        g_screen_w = (float)w;
+        g_screen_h = (float)h;
+
+        // DELETE key toggle (bunni uses DELETE)
+        if (GetAsyncKeyState(VK_DELETE) & 1) g_menu_open = !g_menu_open.load();
+        if (GetAsyncKeyState(VK_END) & 1) { g_running = false; break; }
 
         // toggle click-through based on menu state
         LONG_PTR exStyle = GetWindowLongPtrA(g_overlay_hwnd, GWL_EXSTYLE);
@@ -684,10 +781,6 @@ int main() {
         g_context->ClearRenderTargetView(g_rtv, clear);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         g_swapchain->Present(1, 0);
-
-        // register INSERT globally even when not focused
-        if (GetAsyncKeyState(VK_INSERT) & 1) g_menu_open = !g_menu_open.load();
-        if (GetAsyncKeyState(VK_END) & 1) { g_running = false; break; }
     }
 
     g_running = false;
