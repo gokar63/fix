@@ -273,25 +273,39 @@ static HWND g_overlay_hwnd = nullptr;
 static HWND g_game_hwnd    = nullptr;
 
 // ================================================================
-// DATAMODEL — FakeDataModelPointer path
+// DATAMODEL — FakeDataModelPointer path (DEBUG BUILD)
 // ================================================================
 static uintptr_t find_datamodel() {
     if (!g_roblox_base) return 0;
 
+    printf("[DBG] base=0x%llX, FDM_Pointer offset=0x%X\n",
+        (unsigned long long)g_roblox_base, off::FDM_Pointer);
+
     uintptr_t fdm_ptr = rpm<uintptr_t>(g_roblox_base + off::FDM_Pointer);
-    if (fdm_ptr < 0x10000 || fdm_ptr > 0x7FFFFFFFFFFF) return 0;
+    printf("[DBG] fdm_ptr=0x%llX\n", (unsigned long long)fdm_ptr);
+    if (fdm_ptr < 0x10000 || fdm_ptr > 0x7FFFFFFFFFFF) {
+        printf("[DBG] fdm_ptr INVALID — chain broken at step 1\n");
+        return 0;
+    }
 
     uintptr_t dm = rpm<uintptr_t>(fdm_ptr + off::FDM_DataModel);
-    if (dm < 0x10000) return 0;
+    printf("[DBG] dm=0x%llX (fdm_ptr+0x%X)\n", (unsigned long long)dm, off::FDM_DataModel);
+    if (dm < 0x10000) {
+        printf("[DBG] dm INVALID — chain broken at step 2\n");
+        return 0;
+    }
 
     auto ch = get_children(dm);
+    printf("[DBG] dm children count: %d\n", (int)ch.size());
     int known = 0;
     for (auto c : ch) {
         std::string n = inst_name(c);
+        if (!n.empty()) printf("[DBG]   child: '%s'\n", n.c_str());
         if (n == "Workspace" || n == "Players" || n == "Lighting" ||
             n == "ReplicatedStorage" || n == "StarterGui")
             known++;
     }
+    printf("[DBG] known services: %d\n", known);
     return (known >= 3) ? dm : 0;
 }
 
@@ -639,6 +653,7 @@ int main() {
     printf("  +====================================+\n");
     printf("  |  VANTA External Overlay              |\n");
     printf("  |  RPM + Transparent DX11 Overlay      |\n");
+    printf("  |  DEBUG BUILD — theo offsets           |\n");
     printf("  +====================================+\n\n");
 
     char exe_path[MAX_PATH];
